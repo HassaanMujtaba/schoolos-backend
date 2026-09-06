@@ -219,11 +219,45 @@ permission-denied request returns 403 with the same error shape as any other fai
 
 ---
 
-### Phase 1 — Auth & Identity
+### Phase 1 — Auth & Identity ✅ built, backend side confirmed
 
 Pairs with **frontend Phase 1 (done)** — [`frontend/modules/auth.md`](../frontend/modules/auth.md).
 This is the very first real integration milestone: the frontend's entire session/permission model
 already exists and is tested against a _guessed_ shape of this response.
+
+**Status:** `auth/` + `users/` built (`src/auth/`, `src/users/`), unit-tested
+(`session.service.spec.ts`'s rotation/reuse-detection proof, `duration.spec.ts`) and e2e-tested
+against a live Postgres/Redis (`test/auth.e2e-spec.ts`: login → `/me` → refresh-rotation-with-
+reuse-detection → `/sessions` → logout/logout-all → forgot/reset-password, all against the real
+HTTP surface). `npm run verify` and `npm run test:e2e` both green; a real `nest build` + `node
+dist/main` boot was also curl-verified (helmet headers, CORS, the tighter auth-endpoint throttle,
+and the `HttpExceptionFilter` error shape all present on a live response). Two real bugs found and
+fixed along the way, not just this phase's own code:
+
+- `env.validation.ts`'s `PORT` never actually validated correctly — `enableImplicitConversion`
+  depends on reflected `design:type` metadata that esbuild/SWC-based transpilers (Vite/vitest,
+  ts-node in transpile-only mode) don't compute for an inferred-type property, so `PORT` silently
+  stayed a string and failed `@IsInt()`. Fixed with an explicit `@Type(() => Number)`. This is also
+  why `test/health.e2e-spec.ts` had never actually been run before this phase, despite Phase 0's
+  status note describing it as "written and ready."
+- The frontend's `VITE_API_BASE_URL` assumed `/api`; this backend serves under `/v1` (URI
+  versioning, `main.ts`). Fixed `frontend/.env.example` — flagging it here since it's exactly the
+  kind of frontend-assumption correction this plan's intro describes.
+
+**A design decision this phase had to make that the frontend's assumed contract doesn't address:**
+`LoginDto.identifier` (email or phone) carries no tenant/school selector, but `User.email`/`phone`
+are only unique _within_ a tenant (`schema.prisma`'s `@@unique([tenantId, email])`). Resolved by
+treating a same-identifier collision across tenants as "no such user" (fail closed, never guess) —
+see `auth.service.ts`'s own doc comment and `SECURITY.md`'s pentest checklist. This needs an actual
+product conversation once multi-school identifier collisions are a real scenario, not a hypothetical.
+
+**Also found, not part of this phase's own scope but discovered doing a real browser click-through
+against the built frontend:** `RequireAuth`/`useSession`'s bootstrap doesn't settle cleanly when
+every `/auth/refresh` attempt fails (observed here via this backend's own rate limiter returning 429) — the UI flickered between `/login` and `/dashboard` instead of the hard redirect-to-`/login`
+`modules/auth.md` itself specifies ("never loop silently"). This is frontend code, out of scope for
+this backend-focused pass, but worth a frontend-side follow-up; `RequireAuth.test.tsx`'s mocked
+network layer wouldn't catch this since it's a timing/retry-storm issue only a real backend
+surfaces.
 
 **Module:** `auth/`, `users/`.
 
@@ -766,25 +800,25 @@ The actual side-by-side status, phase by phase. Update this table as each phase'
 completes — it's the single place that answers "is this module really done, or just done on one
 side?"
 
-| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                          | Integration                                                                    |
-| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note) | — (no frontend-facing surface)                                                 |
-| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; admissions↔fees ordering decision needed first          |
-| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                   | ⏳ blocked on backend — **this is the real MVP integration milestone**         |
-| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; fee-linkage decision needed first                       |
-| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; teacher↔employee linkage decision needed first          |
-| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
-| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; billing-provider integration is this phase's real scope |
-| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                   | ⏳ backend's tool-calling layer must land before either side does feature work |
+| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                          | Integration                                                                                                  |
+| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note) | — (no frontend-facing surface)                                                                               |
+| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; admissions↔fees ordering decision needed first                                        |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                   | ⏳ blocked on backend — **this is the real MVP integration milestone**                                       |
+| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; fee-linkage decision needed first                                                     |
+| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                        |
+| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; billing-provider integration is this phase's real scope                               |
+| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                   | ⏳ backend's tool-calling layer must land before either side does feature work                               |
 
 **Reading this table:** the frontend column is almost entirely "done" already — that's the starting
 condition this whole plan was written for, not a milestone to celebrate mid-project. The real work

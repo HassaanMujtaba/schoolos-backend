@@ -6,8 +6,11 @@ export interface AuthenticatedUser {
   tenantId: string;
   branchId: string | null;
   email: string;
+  name: string;
   roles: string[];
   permissions: string[];
+  /** The refresh session (`auth/session.service.ts`) this request's access token was minted alongside. */
+  sessionId: string;
 }
 
 interface RequestWithUser extends Request {

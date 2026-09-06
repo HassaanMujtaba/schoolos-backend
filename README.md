@@ -2,7 +2,7 @@
 
 NestJS + PostgreSQL API for SchoolOS. See [`implementation-plan.md`](./implementation-plan.md) for
 the full phase-by-phase build plan — this README is just how to run what's here today (Phase 0:
-Foundation).
+Foundation, Phase 1: Auth & Identity).
 
 ## Governing docs
 
@@ -21,7 +21,8 @@ Foundation).
 - Config (`src/common/config/`): typed, validated env (`class-validator`-checked at boot — fails
   fast on a missing/malformed variable rather than at first use)
 - Request context (`src/common/context/`): `AsyncLocalStorage`-based tenant/user/permission
-  context, populated by Phase 1's auth guard, read by everything downstream
+  context, populated by `JwtAuthGuard`/`JwtStrategy` (Phase 1) from the verified access token,
+  read by everything downstream
 - Multi-tenancy (`src/common/prisma/`): `PrismaService` scopes every query against a
   tenant-owned model to the request's resolved tenant automatically, fails closed if no tenant is
   in context — see `tenant-scoping.ts` and its own spec for the isolation proof
@@ -37,16 +38,37 @@ Foundation).
 - Seed (`prisma/seed.ts`): the fixed Role/Permission catalog (PRD §4 roles,
   `implementation-plan.md`'s permission-string catalog)
 
-**Not built yet:** everything past Phase 0 — there is no `AuthModule`, so nothing actually issues
-a token yet and every tenant-scoped query will throw until `RequestContextService` has something
-in it. That's Phase 1, next.
+## What's built (Phase 1 — Auth & Identity)
+
+- `AuthModule` (`src/auth/`): `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me`,
+  `POST /auth/logout`, `POST /auth/logout-all`, `POST /auth/forgot-password`,
+  `POST /auth/reset-password`, `GET /auth/sessions` — the full `modules/auth.md` contract
+- JWT access tokens (short-lived, roles/permissions embedded in the token so most requests never
+  hit the database — `JwtStrategy`/`JwtAuthGuard`, registered globally); opaque, rotating refresh
+  tokens in an httpOnly/Secure/SameSite=Strict cookie, session store in Redis
+  (`src/auth/session.service.ts`) with reuse detection: replaying an already-rotated refresh
+  cookie revokes the whole session, not just that request
+- `UsersModule` (`src/users/`) + `PlatformPrismaService` (`src/common/prisma/`): the one
+  deliberately un-scoped Prisma client, for the two reads that must run before/without a tenant
+  context (login-identifier lookup, refresh's permission re-sync) — see `SECURITY.md`'s
+  "Multi-tenancy" section for why `runAsPlatform()` doesn't cover this
+- Per-identifier login lockout and tightened rate limiting on every auth endpoint (Redis-backed,
+  `auth.service.ts` / `AuthController`'s `AUTH_THROTTLE`)
+
+**Known open item:** `POST /auth/login`'s `identifier` has no tenant/school selector, but
+`User.email`/`phone` are only unique _within_ a tenant — see `SECURITY.md`'s pentest checklist and
+`auth.service.ts`'s own doc comment.
+
+**Not built yet:** everything past Phase 1 — see `implementation-plan.md`'s Phase 2 section, next.
 
 ## Local development
 
 Requires Docker (for Postgres/Redis/MinIO) and Node 22+.
 
 ```bash
-cp .env.example .env.local        # defaults already match docker-compose.yml
+cp .env.example .env              # .env, not .env.local — the Prisma CLI (migrate/seed/studio)
+                                   # only auto-loads .env; Nest's own ConfigModule reads either,
+                                   # so .env alone covers both. Defaults already match docker-compose.yml.
 docker compose up -d              # postgres, redis, minio
 npm install
 npm run prisma:migrate            # applies prisma/migrations, prompts for a name on first run
