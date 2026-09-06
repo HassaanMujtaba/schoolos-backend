@@ -1,0 +1,794 @@
+# SchoolOS — Backend Implementation Plan
+
+Scope: the **NestJS + TypeScript API** (REST + a WebSocket gateway) that
+[`frontend/implementation-plan.md`](../frontend/implementation-plan.md) already assumes a contract
+against. Built module-by-module, phase-by-phase, **paired with the frontend's own phases** so each
+phase ends with a real integration pass, not just two halves that happen to compile separately.
+
+Governing docs — read these before starting any phase:
+
+- PRD (`../Complete_School_Management_System_PRD copy.md`) — §45 (entities), §46 (backend module
+  list, background workers), §48 (infrastructure), §51 (API design), §52 (API security), §53 (SaaS
+  billing), §54 (Super Admin) are this plan's direct source material.
+- `frontend/SECURITY.md` + the `security-standards` skill — this is the **one** security baseline
+  for the whole product, frontend and backend; the auth pattern documented there (short-lived
+  in-memory access token, httpOnly rotating refresh cookie, `SECURITY.md` A01–A10 mapping) is not
+  a frontend-only convention, it's what this backend must actually implement.
+- `frontend/implementation-plan.md` + `frontend/modules/*.md` — **the source of truth for the API
+  contract.** Read this the other way round from a normal backend build: the frontend already
+  shipped every MVP module and nearly every backlog module against an _assumed_ REST shape (each
+  module doc's own "Backend dependencies" section). This plan's job is to implement those shapes
+  where they're reasonable and flag a small, explicit list of changes back to frontend where
+  they're not — never to silently invent a different API and leave the frontend's assumptions
+  stranded.
+
+## Why this plan reads differently from a normal greenfield backend plan
+
+Most backend implementation plans design the API first and let the frontend follow. Here the
+frontend got built first, against assumed contracts, specifically so that every screen, form, and
+workflow in the product could be designed and reviewed without waiting on backend. That means:
+
+- **The contract is mostly already decided.** Every phase below lists exact endpoints, request
+  shapes, and status-machine states lifted directly from the corresponding `frontend/modules/*.md`
+  "Backend dependencies" section — not re-derived from the PRD from scratch.
+- **"Done" for a backend phase is an integration pass, not a green test suite in isolation.** Each
+  phase's exit criterion is: run the already-built frontend against the real backend locally, fix
+  whatever drifts (either side), and turn that module doc's "pending backend contract" line into
+  "confirmed."
+- **Where the frontend's assumption is a bad idea** (rare, but see the Phase 3 admissions/fees
+  ordering problem and the Phase 3 document-upload timing problem below), this plan says so
+  explicitly and proposes the fix, rather than building an endpoint nobody should actually call
+  that way.
+
+## Tech stack decisions
+
+Per PRD §46/§48's recommendation, filled in with concrete choices:
+
+| Concern        | Choice                                                                                                                                                                                                                                                                                 | Why                                                                                                                                                                                                                                                                                                                                                               |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Framework      | NestJS 10, TypeScript strict                                                                                                                                                                                                                                                           | PRD §46                                                                                                                                                                                                                                                                                                                                                           |
+| Architecture   | Modular monolith (one deployable, Nest module boundaries matching the folder list below)                                                                                                                                                                                               | 30+ feature areas is a lot of services to operate day one; split out only what actually needs independent scaling later (candidates: `ai`, `notifications` workers)                                                                                                                                                                                               |
+| Database       | PostgreSQL 16                                                                                                                                                                                                                                                                          | PRD §45                                                                                                                                                                                                                                                                                                                                                           |
+| ORM            | Prisma                                                                                                                                                                                                                                                                                 | Schema-first migrations, strong generated TS types, and — closing the frontend plan's own "no generated API client yet" risk note — a straightforward path to generating an OpenAPI spec (`@nestjs/swagger`) the frontend can eventually codegen a typed client from, replacing 30+ hand-written `features/*/api.ts` files without changing their call signatures |
+| Cache / queues | Redis + BullMQ                                                                                                                                                                                                                                                                         | PRD §46 background workers (email, SMS, WhatsApp, PDF, report generation, AI, OCR, notifications, imports/exports, scheduled jobs); also the refresh-token/session store and the Socket.IO adapter for horizontal scaling                                                                                                                                         |
+| Object storage | S3-compatible (S3 in prod, MinIO in dev)                                                                                                                                                                                                                                               | PRD §31 documents, §35 AI document processing, all `FileUploadField` consumers already staged on the frontend                                                                                                                                                                                                                                                     |
+| Realtime       | Socket.IO gateway at `/ws`, Redis adapter                                                                                                                                                                                                                                              | Matches PRD §51's exact event list; frontend already deferred every realtime feature to "after REST flows are proven," so the gateway can land after each module's REST half without blocking anything                                                                                                                                                            |
+| Validation     | `class-validator`/`class-transformer` DTOs, field names matching each frontend `schemas.ts` (Zod) 1:1                                                                                                                                                                                  | Keeps the two sides' validation rules from silently diverging                                                                                                                                                                                                                                                                                                     |
+| API docs       | `@nestjs/swagger`, served at `/docs`                                                                                                                                                                                                                                                   | Also the source for the future generated client above                                                                                                                                                                                                                                                                                                             |
+| Auth tokens    | JWT access token (short-lived, ~15 min, returned in the login/refresh response body — frontend keeps it in memory only, never localStorage), rotating refresh token in an httpOnly/Secure/SameSite=Strict cookie, session store in Redis (device/session list, revocation, logout-all) | Must match `frontend/src/lib/http/apiClient.ts`'s already-built single-flighted refresh flow and `SECURITY.md`'s documented pattern exactly — this is not a free choice, it's matching code that already exists                                                                                                                                                   |
+| Search         | PostgreSQL full-text (`tsvector`) to start                                                                                                                                                                                                                                             | PRD §42 — matches `fees.md`'s already-built `/search` assumption; Meilisearch/OpenSearch stays a later swap if search quality becomes a real complaint                                                                                                                                                                                                            |
+
+## Multi-tenancy & RBAC — build once, correctly, before any feature module
+
+This is Phase 0's actual point, not a formality:
+
+- **Tenant isolation.** Every tenant-owned Prisma model carries `tenantId` (+ `branchId` where
+  applicable). A request-scoped `TenantContextService` resolves `tenantId` from the authenticated
+  session — **never** from a client-supplied header, query param, or body field (PRD §52's
+  explicit "never trust tenantId from the client") — and a Prisma [client
+  extension](https://www.prisma.io/docs/orm/prisma-client/client-extensions)/middleware injects
+  `WHERE tenantId = :ctx` on every tenant-scoped query so a missing filter fails closed, not open.
+  Unit-test this with two fake tenants and assert cross-tenant reads return nothing, before writing
+  a single feature endpoint on top of it.
+- **RBAC.** One permission catalog, seeded into the DB (`Role`, `Permission`, `RolePermission`
+  tables), using the _exact_ permission strings every `frontend/modules/*.md` doc already committed
+  to (collected below) — a `PermissionsGuard` + `@RequirePermission('students.read')` decorator
+  reads from the authenticated user's resolved permission set, mirroring
+  `frontend/src/lib/permissions.ts`'s `can`/`canAll`/`canAny` shape so the two sides reason about
+  permissions identically.
+- **Audit logging.** An interceptor wrapping every mutating endpoint, writing an append-only
+  `AuditLog` row (who/what/when/where/entity/old value/new value/IP/device, per PRD §43) —
+  append-only enforced at the DB grant level (application role has `INSERT` but not `UPDATE`/
+  `DELETE` on `audit_log`), not just by convention.
+
+### Permission catalog (collected from every frontend module doc)
+
+Seed these verbatim — they're not a proposal, they're what the already-built frontend already
+calls `can('students.read')` (etc.) with:
+
+```text
+students.read / students.create / students.update / students.delete / students.export
+parents.read / parents.manage
+teachers.read / teachers.manage
+admissions.read / admissions.manage
+school-setup.manage (branches/academic years/classes/sections/subjects)
+timetable.read / timetable.manage / timetable.generate
+attendance.read / attendance.mark / attendance.modify / attendance.export
+homework.read / homework.manage / homework.grade
+exams.read / exams.manage / marks.enter / results.publish
+fees.read / fees.create / fees.collect / fees.refund / fees.delete
+library.read / library.manage-catalog / library.circulate
+transport.read / transport.manage / transport.track
+inventory.read / inventory.manage / assets.read / assets.manage
+hostel.read / hostel.manage / hostel.allocate
+hr.read / hr.manage / payroll.read / payroll.run / payroll.approve
+leave.request / leave.approve
+messages.send / announcements.read / announcements.create / events.manage
+ptm.manage / ptm.book
+documents.read / documents.upload / documents.delete
+certificates.generate / certificates.read
+reports.read / reports.export
+platform.schools.manage / platform.subscriptions.manage / platform.billing.read /
+platform.feature-flags.manage / platform.support.read / platform.audit.read
+ai.query / ai.generate-content / ai.view-analytics
+```
+
+Confirm this list with frontend before final seed — it's assembled from ~20 module docs and is the
+single most load-bearing contract in the whole integration (every `RequirePermission` call on the
+frontend depends on the string matching exactly).
+
+## Folder structure
+
+Mirrors the frontend's feature-based convention (`frontend/implementation-plan.md` "Architecture
+conventions") so the two repos read the same way side by side:
+
+```
+backend/
+├── src/
+│   ├── main.ts                 # Helmet, CORS (locked to frontend origin), global ValidationPipe,
+│   │                           # global exception filter, Swagger bootstrap
+│   ├── app.module.ts
+│   ├── common/
+│   │   ├── guards/              # PermissionsGuard, TenantGuard
+│   │   ├── decorators/          # @RequirePermission, @CurrentUser, @CurrentTenant
+│   │   ├── interceptors/        # AuditInterceptor, TransformResponseInterceptor
+│   │   ├── filters/              # global HttpExceptionFilter → consistent error shape
+│   │   └── prisma/               # PrismaService (tenant-scoping extension)
+│   ├── auth/                    # see Phase 1
+│   ├── users/
+│   ├── tenants/                 # + branches/
+│   ├── school-setup/            # academic years, classes, sections, subjects
+│   ├── students/
+│   ├── parents/
+│   ├── teachers/
+│   ├── admissions/
+│   ├── documents/               # shared upload/retrieval primitive — needed starting Phase 3
+│   ├── timetable/
+│   ├── attendance/
+│   ├── homework/
+│   ├── examinations/
+│   ├── fees/
+│   ├── accounting/
+│   ├── payroll/
+│   ├── hr/
+│   ├── library/
+│   ├── transport/
+│   ├── inventory/
+│   ├── hostel/
+│   ├── communication/           # notifications, messages, announcements, events, ptm
+│   ├── certificates/
+│   ├── reports/
+│   ├── search/
+│   ├── platform/                # Super Admin console: schools, plans, billing, feature flags
+│   ├── ai/                      # last, see Phase 7+
+│   ├── audit/
+│   ├── health/
+│   └── ws/                      # Socket.IO gateway
+├── prisma/
+│   ├── schema.prisma
+│   └── migrations/
+├── test/                        # e2e (supertest) — one spec per module, run against a real
+│                                # Postgres/Redis via docker-compose, not mocks
+└── docker-compose.yml            # postgres, redis, minio — local dev parity with prod shape
+```
+
+## Phase-by-phase build plan
+
+Phases are numbered to match `frontend/implementation-plan.md` exactly, so "Phase 4" always means
+the same slice of the product on both sides. Each phase lists the NestJS modules, the Prisma
+entities, the endpoints (taken from the frontend module doc named), and the concrete integration
+step that closes out that module doc's "pending backend contract" line.
+
+### Phase 0 — Foundation ✅ scaffolded
+
+**Status:** the repo itself now exists (`backend/`, its own git repo, sibling to `frontend/`) with
+everything below built and passing `npm run verify` + `npm run build` — see git history for detail.
+**Not yet done:** an actual Prisma migration file (`prisma migrate dev` needs a live Postgres,
+which this environment doesn't have — run `docker compose up -d && npm run prisma:migrate` once);
+the two-tenant isolation proof exists today as a fast, DB-free unit test
+(`src/common/prisma/tenant-scoping.spec.ts`, testing the extracted `applyTenantScoping` logic
+directly) rather than an integration test against a real database — `test/health.e2e-spec.ts` is
+written and ready but, same reason, unverified against a live stack in this environment. Both are
+the first things to run once Postgres/Redis are reachable, before starting Phase 1.
+
+**Modules:** `common/` (guards, interceptors, filters, Prisma tenant-scoping), `health/`.
+
+**Entities:** `Tenant`, `Branch`, `User`, `Role`, `Permission`, `RolePermission`, `AuditLog`.
+
+**Deliverables:**
+
+- Nest CLI scaffold; ESLint/Prettier config aligned with frontend's (same rule intent, not
+  necessarily the same config file); Husky pre-commit/pre-push; GitHub Actions CI
+  (`lint` + `test` + `build`, matching `frontend/.github/workflows/ci.yml`'s shape).
+- `docker-compose.yml`: postgres, redis, minio — `npm run dev` should bring up a fully working
+  local stack with one command, same "clone and go" bar the frontend already meets.
+- Prisma schema skeleton (the six entities above) + first migration.
+- `PrismaService` with the tenant-scoping extension, `PermissionsGuard` + `@RequirePermission`,
+  `AuditInterceptor`, global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })`,
+  global exception filter producing an error shape the frontend's `ErrorState` component can render
+  directly (`{ statusCode, message, error, requestId }`).
+- Rate limiting (`@nestjs/throttler`), Helmet, CORS locked to the frontend's known origins.
+- `GET /health` — liveness/readiness (DB, Redis, storage reachability) for PRD §61 observability
+  and for infra health checks.
+- Swagger at `/docs`.
+
+**Definition of done:** CI green; a two-tenant Prisma test proves cross-tenant row isolation; a
+permission-denied request returns 403 with the same error shape as any other failure.
+
+**Unblocks:** everything else. No frontend-facing endpoints ship this phase.
+
+---
+
+### Phase 1 — Auth & Identity
+
+Pairs with **frontend Phase 1 (done)** — [`frontend/modules/auth.md`](../frontend/modules/auth.md).
+This is the very first real integration milestone: the frontend's entire session/permission model
+already exists and is tested against a _guessed_ shape of this response.
+
+**Module:** `auth/`, `users/`.
+
+**Entities:** `User`, `Session`/`RefreshToken` (Redis, not Postgres — short-lived, high-churn).
+
+**Endpoints** (from `modules/auth.md` "Backend dependencies," unchanged):
+
+```
+POST /auth/login          email/phone + password → { accessToken, user, roles, permissions }
+                           refresh token set as httpOnly cookie, not in the body
+POST /auth/refresh        rotates the access token off the httpOnly refresh cookie
+GET  /auth/me             rehydrate { user, roles, permissions } on app load
+POST /auth/logout         revoke current session
+POST /auth/logout-all     revoke every session for this user
+POST /auth/forgot-password
+POST /auth/reset-password
+GET  /auth/sessions       active sessions/devices + last-active, for SessionsDialog
+```
+
+**Integration task (the actual point of this phase):** confirm the exact `{ user, roles,
+permissions }` shape and the real role-name strings with frontend _before_ anything else consumes
+them — `frontend/src/features/auth/portal.ts`'s `resolvePortalPath` keys off these role strings
+directly, and every `RequirePermission` call in the app depends on the permission-string catalog
+above matching. Run `frontend`'s existing `RequireAuth.test.tsx`/`hooks.test.tsx`/`portal.test.ts`
+against this real backend locally (not just its own mocks) as the phase's exit test.
+
+**Explicitly out of scope for MVP** (per `modules/auth.md`'s own note): OTP, Google/Microsoft
+login, MFA — PRD §5 lists them, but they're not in the PRD §65 MVP list on the frontend side
+either; build the plain email/phone+password flow first.
+
+---
+
+### Phase 2 — School Setup & Core Entities
+
+Pairs with **frontend Phase 2 (done)** —
+[`frontend/modules/school-setup.md`](../frontend/modules/school-setup.md).
+
+**Module:** `tenants/` (branches), `school-setup/` (academic years, classes, sections, subjects).
+
+**Entities:** `Branch`, `Campus`, `Building`, `Department`, `AcademicYear`, `Term`, `Class`,
+`Section`, `Subject`, `Holiday`.
+
+**Endpoints:**
+
+```
+GET/PATCH  /schools/current           school profile
+CRUD       /branches                  (+ nested buildings/departments)
+CRUD       /academic-years            (+ nested terms/holidays)
+CRUD       /classes
+CRUD       /sections
+CRUD       /subjects
+```
+
+**Integration task:** confirm the nested-resource shape frontend assumed (buildings/departments as
+sub-resources of `/branches/:id`, terms/holidays as sub-resources of `/academic-years/:id`) versus
+flat top-level collections — `modules/school-setup.md`'s own open question. Pick one and update
+whichever side assumed wrong; this phase establishes the **list → create/edit form → detail view**
+pattern every later phase reuses on both sides (`EntityForm`/`EntityDetail` on frontend), so getting
+the nesting convention right here saves re-litigating it 15 more times.
+
+---
+
+### Phase 3 — People
+
+Pairs with **frontend Phase 3 (done)** — `modules/students.md`, `modules/parents.md`,
+`modules/teachers.md`, `modules/admissions.md`.
+
+**Modules:** `students/`, `parents/`, `teachers/`, `admissions/`, and — **build early, even though
+its own dedicated frontend screens are Phase 7+** — `documents/`'s upload primitive.
+
+**Entities:** `Student`, `Parent`, `Guardian`, `Teacher`, `Enrollment`, `AdmissionInquiry`,
+`AdmissionApplication`, `Document`.
+
+**Endpoints:**
+
+```
+CRUD  /students
+CRUD  /parents            (+ child-linking)
+CRUD  /teachers
+CRUD  /admissions         + stage-transition actions: submit, review, schedule-test, interview,
+                          accept/reject, enroll (each flips AdmissionApplication.stage server-side)
+POST  /documents/upload    signed-URL or direct upload, virus/malware scan, returns { id, url, ... }
+GET   /documents           ?category=&ownerId= — retrieval
+GET   /documents/:id/versions
+```
+
+**Two known contract problems to resolve this phase, not defer again** (both already flagged
+independently by two different frontend module docs, which is a signal to fix them here rather than
+push the paper further downstream):
+
+1. **Admissions' Fee Payment stage runs _before_ Enrollment creates the `Student` record, but an
+   `Invoice` requires a student id.** `modules/admissions.md` and `modules/fees.md` both flag this
+   as unresolved. Pick one: (a) allow a fee structure/invoice to reference an
+   `AdmissionApplication` id instead of a `Student` id and reconcile on enrollment, or (b) reorder
+   the workflow so enrollment happens before fee collection and adjust the frontend stepper. This
+   is a product/data-model decision, not a coding task — resolve it before building `/admissions`'s
+   stage-transition endpoints.
+2. **`FileUploadField` consumers (Admissions' documents panel, Students' documents tab) stage files
+   before the owning entity exists**, so there's no `ownerId` yet at upload time. Support a
+   two-step flow: upload returns a document id with `ownerId: null`, then a follow-up
+   `PATCH /documents/:id` (or equivalent) attaches it once the student/admission record is created
+   — document this explicitly since `modules/documents-certificates.md` flags it as still open for
+   every consumer.
+
+**Integration task:** wire `FileUploadField` (already built, client-side-validation-only) to this
+real endpoint for its first two consumers (Admissions, Students) — this closes the most-cited open
+question across the frontend plan (repeated in Homework's and Transport's docs too, resolved for
+those modules in Phase 4/Phase 7+ once each has its own owning entity).
+
+---
+
+### Phase 4 — Academics
+
+Pairs with **frontend Phase 4 (done)** — `modules/timetable.md`, `modules/attendance.md`,
+`modules/homework.md`.
+
+**Modules:** `timetable/`, `attendance/`, `homework/`.
+
+**Entities:** `Timetable`, `TimetableEntry`, `Substitution`, `Attendance`, `Homework`,
+`HomeworkSubmission`, `LeaveRequest` (student leave, PRD §14).
+
+**Endpoints:**
+
+```
+GET   /timetable/entries          ?classId=&teacherId=&roomId=
+CRUD  /timetable/entries
+POST  /timetable/generate          queued job — constraint solving server-side; the frontend only
+                                   triggers a run and polls/reviews the result, never solves a
+                                   schedule client-side
+CRUD  /timetable/substitutions     date-scoped
+GET   /attendance                  + a studentId param for the portal ('me' idiom, see below)
+POST  /attendance/bulk
+GET   /homework                    + a studentId param for the portal
+POST  /homework/:id/submissions
+GET   /teachers/me/dashboard       aggregation: today's classes, pending tasks (or split into
+                                   composed calls — see teachers.md's own still-open question;
+                                   decide once this phase's real data volumes are known)
+```
+
+**The `me` idiom, used across four different modules' assumed contracts** (attendance, homework,
+teachers dashboard, and later leave/payroll) — standardize it once here: any endpoint accepting a
+`studentId`/`teacherId`/`employeeId` query param also accepts the literal string `"me"`, resolved
+server-side from the authenticated session to that user's own linked record. Document this as a
+platform-wide convention (not a per-module special case) so Phase 7+ modules that reuse it
+(HR & Payroll's `employeeId=me`, Library's portal `studentId=me`) don't each reinvent it slightly
+differently.
+
+**Integration task:** confirm the `studentId`/`teacherId=me` param on `GET /attendance` and
+`GET /homework` (both explicitly flagged as assumed extensions in the frontend plan's Phase 4
+section). Realtime attendance-change notifications (Socket.IO `attendance.updated`) stay deferred
+on both sides, per the frontend's own phase-ordering call — build the `/ws` gateway itself once
+Phase 6/7 communication work needs it, not speculatively here.
+
+---
+
+### Phase 5 — Examinations
+
+Pairs with **frontend Phase 5 (done)** —
+[`frontend/modules/examinations.md`](../frontend/modules/examinations.md).
+
+**Module:** `examinations/`.
+
+**Entities:** `Exam`, `ExamSchedule`, `Mark`, `Result`, `Grade`, `ReportCard`.
+
+**Endpoints:**
+
+```
+CRUD /exams                       + a studentId filter for the portal list (flagged open)
+GET  /exams/:id/marks-entry-sheet  one row per enrolled student, for the bulk grid
+POST /exams/:id/marks              bulk upsert
+GET  /exams/:id/results            grade/GPA/rank — server-computed, never recomputed client-side
+                                   (frontend's own resolved assumption — keep it that way)
+POST /exams/:id/publish            gated server-side by results.publish too, not just frontend RBAC
+GET  /report-cards/:studentId
+```
+
+**Integration task:** grade/GPA/ranking calculation is entirely a backend concern per the
+frontend's already-resolved assumption — implement the actual grading-scale logic here (PRD §16),
+confirm the `studentId` filter on `GET /exams`, and do the one piece of verification that can't be
+automated: a real-browser print-preview check of `/report-cards/:studentId` against real data
+(`modules/examinations.md`'s own still-open item).
+
+---
+
+### Phase 6 — Finance
+
+Pairs with **frontend Phase 6 (done) — closes the PRD §65 MVP on the frontend side.**
+[`frontend/modules/fees.md`](../frontend/modules/fees.md).
+
+**Modules:** `fees/`, `accounting/` (minimal — chart of accounts/expenses, not the full PRD §19
+scope yet), `search/`.
+
+**Entities:** `FeeStructure`, `Invoice`, `Payment`, `Refund`, `Discount`/`Scholarship`.
+
+**Endpoints:**
+
+```
+CRUD /fees/structures
+POST /fees/invoices                 single student or bulk-by-class
+POST /fees/invoices/:id/payments
+POST /fees/payments/:id/refund
+GET  /fees/payments/:id/receipt
+GET  /fees/outstanding
+GET  /search?q=&type=                cross-entity (students, invoices, staff, ...) — Postgres
+                                     full-text (`tsvector` + GIN index) per PRD §42
+```
+
+**Integration task — this is the MVP milestone.** Once this phase's endpoints are live and
+`frontend`'s Phase 6 screens are re-verified against them (fee structures → invoice → payment →
+receipt → outstanding-balances dashboard, plus `CommandPalette`'s real `/search`), **PRD §65's MVP
+is genuinely end-to-end**, not just frontend-complete-against-assumptions. Verify the full flow
+together (admission → enrollment → attendance → homework → exam → fee payment), not each module in
+isolation — the frontend plan calls this out explicitly.
+
+---
+
+### Phase 7+ — Backlog modules
+
+The frontend already shipped **every one of these** (except AI Assistant) against assumed
+contracts. Build the backend in the same order the frontend already established, so each
+integration pass has a finished, waiting frontend rather than the reverse:
+
+#### 7.1 — Documents & Certificates (do early — Phase 3 already needs the base upload endpoint)
+
+[`modules/documents-certificates.md`](../frontend/modules/documents-certificates.md)
+
+- **Module:** `documents/` (extend Phase 3's primitive with the browse/search library + version
+  history), `certificates/`.
+- **Entities:** `Document`, `DocumentVersion`, `CertificateTemplate`, `Certificate`.
+- **Endpoints:**
+  ```
+  GET  /documents?category=&ownerId=
+  GET  /documents/:id/versions
+  POST /certificates/generate      template + dynamic fields → PDF, QR, unique cert number
+  GET  /certificates/verify/:code  PUBLIC, unauthenticated — no session required, matches the
+                                   frontend's own bare-axios (non-apiClient) call
+  ```
+- **Integration task:** decide whether certificate dynamic fields come from a
+  `POST /certificates/generate`-adjacent template-config endpoint or stay a frontend-fixed set
+  (`CERTIFICATE_TEMPLATE_FIELDS`) — currently assumed-fixed, flagged open by the module doc. Also
+  resolve §26's audited-access-reason requirement for medical documents specifically (an
+  access-reason prompt beyond normal RBAC) — not built on either side yet.
+
+#### 7.2 — Library
+
+[`modules/library.md`](../frontend/modules/library.md)
+
+- **Module:** `library/`.
+- **Entities:** `Book`, `BookCopy`, `LibraryCategory`, `LibraryShelf`, `LibraryMember`, `Loan`,
+  `Fine`, `Reservation`, `LibrarySettings`.
+- **Endpoints:**
+  ```
+  CRUD /library/books, /library/categories, /library/shelves
+  CRUD /library/books/:bookId/copies
+  GET  /library/books/:id
+  CRUD /library/members
+  GET  /library/copies/lookup?barcode=      returns nextReservation when relevant
+  POST /library/issue
+  POST /library/return                       computes fineAmount server-side
+  GET  /library/fines
+  POST /library/fines/:loanId/pay
+  POST /library/fines/:loanId/waive
+  GET/PATCH /library/settings                { finePerDayRate, maxFine }
+  GET  /library/reservations                 + studentId filter (portal)
+  POST /library/reservations                 { bookId, memberId } or { bookId, studentId }
+  POST /library/reservations/:id/cancel
+  POST /library/reservations/:id/fulfill      atomic: issues a copy + marks fulfilled
+  GET  /library/loans?studentId=              'me' idiom
+  ```
+- **Integration task:** add the real `readyAt`/`expiresAt` fields to `Reservation` the frontend
+  flags as missing — its own hold-expiry countdown is currently a client-side-only approximation
+  (`lib/reservationExpiry.ts`) specifically because this field doesn't exist yet; adding it lets
+  that whole client workaround be deleted in favor of a pure function over a real timestamp, ideally
+  alongside a server-side auto-cancel job for expired holds.
+
+#### 7.3 — Transport (vehicle/route management; live tracking is its own sub-phase)
+
+[`modules/transport.md`](../frontend/modules/transport.md)
+
+- **Module:** `transport/`.
+- **Entities:** `Vehicle`, `MaintenanceRecord`, `Route`, `RouteStop`, `TransportAssignment`.
+- **Endpoints:**
+  ```
+  CRUD /transport/vehicles
+  CRUD /transport/routes
+  ```
+- **Not this sub-phase:** live GPS WebSocket channel, geofencing, pickup/drop-off confirmation,
+  arrival/emergency notifications — the frontend explicitly deferred `LiveTrackingMap` pending a
+  mapping-library decision; don't build the realtime channel until that's picked (backend and
+  frontend should make this decision together, since it affects the WS payload shape).
+- **Integration task:** add a batch student-lookup-by-ids endpoint if route detail's "Students" tab
+  needs resolved names instead of just a count (flagged as a nice-to-have, not required).
+
+#### 7.4 — Inventory & Assets
+
+[`modules/inventory.md`](../frontend/modules/inventory.md)
+
+- **Module:** `inventory/`.
+- **Entities:** `StockCategory`, `StockItem`, `StockMovement`, `Asset`, `AssetMaintenanceRecord`.
+- **Endpoints:**
+  ```
+  CRUD /inventory/stock-categories
+  CRUD /inventory/stock                 quantity is read-only here — see below
+  POST /inventory/stock/:id/movements    the only way quantity changes (issue/restock/adjustment) —
+                                        matches frontend's StockAdjustmentDialog-only mutation path
+  CRUD /assets
+  ```
+
+#### 7.5 — Hostel
+
+[`modules/hostel.md`](../frontend/modules/hostel.md)
+
+- **Module:** `hostel/`.
+- **Entities:** `Hostel`, `Room` (with `floorLabel` as a plain field — no separate Floor entity,
+  matching the frontend's collapsed `hostel → room → bed` hierarchy), `Allocation`, `Visitor`,
+  `Complaint`. **No `Bed` entity** — a room's `capacity` is its bed count; occupancy is derived from
+  active allocations server-side (`GET /hostel/rooms/:id/occupancy`), matching
+  `lib/occupancy.ts`'s frontend logic exactly so the two never disagree about which beds are free.
+- **Endpoints:**
+  ```
+  CRUD /hostel/hostels
+  CRUD /hostel/rooms
+  GET  /hostel/rooms/available?hostelId=
+  GET  /hostel/rooms/:id/occupancy
+  GET  /hostel/allocations
+  POST /hostel/allocate
+  PATCH /hostel/allocations/:id/reassign
+  POST /hostel/allocations/:id/vacate
+  GET/POST /hostel/visitors
+  POST /hostel/visitors/:id/check-out
+  CRUD /hostel/complaints
+  ```
+- **Integration task:** decide hostel fee linkage with `fees/` (a fee type/structure reference vs.
+  a separate billing flow) — unresolved on both sides, needs a joint decision before either side
+  builds it. Also confirm with product whether hostel features should be gated behind a
+  school-level feature flag (not every tenant is a boarding school) — if yes, that's a
+  `platform/feature-flags` catalog entry, not a hostel-module change.
+
+#### 7.6 — HR & Payroll
+
+[`modules/hr-payroll.md`](../frontend/modules/hr-payroll.md)
+
+- **Modules:** `hr/`, `payroll/`.
+- **Entities:** `Employee`, `EmployeeLifecycleEvent` (transfer/resignation/termination),
+  `LeaveBalance`, `LeaveRequest` (employee), `SalaryStructure`, `PayrollPeriod`, `Payslip`.
+- **Endpoints:**
+  ```
+  GET/POST/PATCH /hr/employees          no DELETE — status changes via lifecycle actions only
+  POST /hr/transfers
+  POST /hr/resignations
+  POST /hr/terminations
+  GET/POST /leave/employee               employeeId accepts 'me'
+  PATCH /leave/employee/:id
+  GET  /leave/employee/balances
+  GET/PUT /payroll/salary-structures/:employeeId
+  GET/POST /payroll/periods
+  POST /payroll/periods/:id/run          draft → generated
+  POST /payroll/periods/:id/approve      generated → approved
+  GET  /payroll/payslips                 filterable by periodId or employeeId=me
+  GET  /payroll/payslips/:id
+  ```
+- **Payroll math (PRD §20's formula) is computed entirely server-side** — the frontend only
+  displays the breakdown, per its own resolved assumption; implement the formula here, don't let it
+  drift into the frontend as a "just for preview" shortcut the way library's fine-rate preview
+  originally did.
+- **Integration task:** define the real teacher↔employee linkage (frontend currently assumes
+  `Employee.id === Teacher.id`, flagged explicitly as unconfirmed) — this blocks
+  `TeacherLeaveTab`'s reuse of `EmployeeLeaveSummary` from being correct for any school where that
+  assumption doesn't hold.
+
+#### 7.7 — Communication
+
+[`modules/communication.md`](../frontend/modules/communication.md)
+
+- **Module:** `communication/` (notifications, messages, announcements, events, PTM),
+  `notifications/` (delivery engine, PRD §36 — push/email/SMS/WhatsApp providers + templates +
+  retry/fallback, a background-worker concern, not this module's REST surface).
+- **Entities:** `Notification`, `NotificationPreference`, `MessageThread`, `Message`,
+  `Announcement`, `Event` (with `isExternal` holiday/exam mirrors sourced from `school-setup`/
+  `examinations`, not owned here), `PtmSlot`, `PtmBooking` (one entity — frontend already merged
+  these).
+- **Endpoints:**
+  ```
+  GET  /notifications
+  GET  /notifications/unread-count
+  PATCH /notifications/:id/read
+  PATCH /notifications/read-all
+  GET/PUT /notifications/preferences
+  GET  /messages/threads
+  GET  /messages/threads/:id
+  POST /messages/threads
+  POST /messages/threads/:id/messages
+  PATCH /messages/threads/:id/read
+  CRUD /announcements
+  CRUD /events                            isExternal entries read-only from this module's own CRUD
+  GET  /ptm/availability
+  POST /ptm/slots
+  DELETE /ptm/slots/:id
+  POST /ptm/book
+  GET  /ptm/bookings/mine
+  POST /ptm/bookings/:id/cancel
+  PATCH /ptm/bookings/:id
+  ```
+- **This is where the `/ws` Socket.IO gateway finally gets built** — every earlier phase deferred
+  realtime delivery to "after REST flows are proven"; this module is the first one where realtime
+  is the actual point (notification delivery, live unread counts). Build REST first anyway
+  (frontend already polls every 30s and will keep working once the gateway lands), then add the
+  gateway and swap polling for push on the frontend side as a follow-up, not a blocking dependency.
+- **Integration task:** the two component-level interactive tests the frontend's own checklist
+  still has open (send/receive a thread end to end, book a PTM slot end to end) are a good shape
+  for the first real e2e tests run against this live backend, not just frontend-mocked ones.
+
+#### 7.8 — Reports & Analytics
+
+[`modules/reports-analytics.md`](../frontend/modules/reports-analytics.md)
+
+- **Module:** `reports/` — mostly read/aggregation over data every other module already owns; build
+  this _after_ the modules it aggregates (fees, attendance, exams, admissions), not before.
+- **Endpoints:**
+  ```
+  GET /reports/principal-dashboard
+  GET /reports/academic?classId=&subjectId=
+  GET /reports/financial?from=&to=
+  GET /reports/:id/export?format=pdf|excel|csv
+  ```
+- PDF/Excel export is entirely server-generated (the frontend only triggers a blob download) —
+  budget real time for report-template/export-formatting work here, it's not a thin pass-through.
+
+#### 7.9 — Platform Console (Super Admin)
+
+[`modules/platform-console.md`](../frontend/modules/platform-console.md)
+
+- **Module:** `platform/` — the one module that legitimately reads across tenants; every query here
+  bypasses the normal single-tenant scoping (still permission-gated, but on `platform.*`
+  permissions tied to the Super Admin role specifically, PRD §4's one role not scoped to a school).
+- **Entities:** `School` (tenant summary view), `Plan`, `Subscription`, `BillingRecord`,
+  `FeatureFlag`, `PlatformAuditLog`. Needs a real billing provider integration (Stripe or
+  equivalent) for PRD §53's monthly/annual/trial/coupon/invoice/usage-limit requirements — this
+  phase's biggest scope item isn't the CRUD, it's the billing integration underneath it.
+- **Endpoints:**
+  ```
+  GET/POST/PATCH /platform/schools
+  GET/POST/PATCH /platform/subscriptions
+  GET/POST/PATCH /platform/plans
+  GET  /platform/billing
+  GET  /platform/users
+  GET  /platform/usage
+  GET/PATCH /platform/feature-flags
+  GET  /platform/system-health
+  GET  /platform/audit-logs
+  ```
+- **Integration task:** confirm with product/security whether "log in as this school" support
+  tooling is in scope at all — the frontend explicitly did not build it, treating it as its own
+  audited feature rather than a casual admin convenience; don't add a backend endpoint for it
+  without that same review.
+
+#### 7.10 — AI Assistant (explicitly last, on both sides)
+
+[`modules/ai-assistant.md`](../frontend/modules/ai-assistant.md)
+
+- **This phase does not start with a REST endpoint list — it starts with the permission-scoped
+  tool-calling/agent layer itself**, reviewed against the `security-standards` skill specifically
+  for AI data access (PRD §34's hard requirement: the assistant must never see data the asking user
+  couldn't otherwise see). Build and document that layer first; only then implement:
+  ```
+  POST /ai/query                  School Assistant NL Q&A — response must include what data it
+                                  looked at (explainability), scoped to the caller's own permissions
+  POST /ai/generate                Teacher Assistant content generation (draft only, never
+                                  auto-published into homework/exams)
+  GET  /ai/analytics/:studentId    advisory insights, not a new source of truth
+  POST /ai/documents/process       OCR → vision model → LLM extraction → schema validation →
+                                  human review (§35) — surfaces as status on the existing
+                                  documents/ upload primitive, not a new upload flow
+  ```
+- Do not let frontend start UI work on this module until the tool-calling layer's contract is
+  documented — building ahead of it risks designing around assumptions that don't match the
+  eventual security model, per the frontend module doc's own explicit warning.
+
+## Infrastructure & environments
+
+Per PRD §48:
+
+- **Local dev:** `docker-compose.yml` (postgres, redis, minio) + `npm run dev` — no cloud
+  dependency to develop against.
+- **Staging/production (AWS, per PRD §48's example):** ECS/Fargate for the API, RDS PostgreSQL,
+  ElastiCache Redis, S3, SQS or BullMQ-on-ElastiCache for queues, SES for email, CloudFront in
+  front of the frontend build, Secrets Manager for credentials, WAF, Route 53, CloudWatch for logs/
+  metrics. Vercel remains an option for the frontend build specifically (per PRD §48's note) with
+  this backend hosted separately — no change needed here either way.
+- **CI/CD:** GitHub Actions — lint/test/build on every PR, migration-dry-run against a throwaway
+  Postgres, deploy-on-merge-to-main to staging, manual promote to production.
+
+## Testing strategy (PRD §62, backend scope)
+
+- **Unit:** services, business logic (permission checks, payroll formula, grading calculations,
+  depreciation if it ever moves server-side, occupancy math) — pure functions get pure unit tests,
+  same discipline the frontend already applies to its own `lib/*.ts` files.
+- **Integration:** every module's controller+service+Prisma path, run against a real (dockerized)
+  Postgres + Redis, not mocks — this is where tenant isolation and permission gating actually get
+  proven, not in unit tests with a stubbed Prisma client.
+- **E2E (supertest, per module):** log in as a seeded user of each relevant role, exercise the
+  module's real HTTP surface end to end (create → read → update → the module's own workflow, e.g.
+  admission stage transitions or payroll's draft→generated→approved gate), assert both the response
+  shape _and_ that a wrong-tenant/wrong-permission request is rejected.
+- **Cross-stack E2E (the phase-closing step every phase above calls for):** once a phase's backend
+  endpoints are live, run the _frontend's own_ existing test suite and, where it has one, its
+  Playwright/browser flow against this real backend instead of its mocks — this is what actually
+  turns "pending backend contract" into "confirmed" in the frontend plan, not a backend-only test
+  passing in isolation.
+- **Critical end-to-end workflows** (PRD §63) get one full-stack test each once their owning phases
+  are all done: new student (admission→enrollment), daily attendance, fee payment, examination,
+  transport pickup — run against both apps together, not simulated.
+
+## Cross-cutting Definition of Done — every module, every phase
+
+Not repeated per module above — treat this as the backend-side counterpart to the frontend plan's
+own cross-cutting checklist (`frontend/implementation-plan.md`):
+
+- [ ] Prisma schema migration committed, reviewed for tenant-scoping (`tenantId`/`branchId` present
+      on every tenant-owned table) and indexing (foreign keys, common filter columns)
+- [ ] Every mutating endpoint gated by `@RequirePermission` using the exact string the frontend
+      already calls `can()`/`RequirePermission` with (cross-check against the catalog above)
+- [ ] DTO validation matches the frontend's `schemas.ts` field-for-field (same required/optional,
+      same string/number/enum constraints) — drift here is the single most common source of a
+      "works in Postman, breaks in the app" bug
+- [ ] Audit logging wired for every create/update/delete (PRD §43)
+- [ ] Unit tests for business logic, integration tests for the controller+service+DB path, an e2e
+      spec exercising the module's real workflow as at least one seeded role
+- [ ] Swagger annotations complete (`@ApiProperty` etc.) — this doc becomes the generated-client
+      source later, incomplete annotations now are a future migration cost
+- [ ] Checked against the `security-standards` skill — mandatory for anything touching auth, file
+      upload, payments, or PII (students/health/payroll all qualify)
+- [ ] The corresponding `frontend/modules/<name>.md` doc's "pending backend contract" line is
+      updated to reflect what was actually confirmed or changed this phase — this plan and the
+      frontend plan should never silently drift back out of sync once a phase closes
+
+## Integration tracker
+
+The actual side-by-side status, phase by phase. Update this table as each phase's integration pass
+completes — it's the single place that answers "is this module really done, or just done on one
+side?"
+
+| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                          | Integration                                                                    |
+| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note) | — (no frontend-facing surface)                                                 |
+| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; admissions↔fees ordering decision needed first          |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                   | ⏳ blocked on backend — **this is the real MVP integration milestone**         |
+| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; fee-linkage decision needed first                       |
+| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; teacher↔employee linkage decision needed first          |
+| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                          |
+| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; billing-provider integration is this phase's real scope |
+| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                   | ⏳ backend's tool-calling layer must land before either side does feature work |
+
+**Reading this table:** the frontend column is almost entirely "done" already — that's the starting
+condition this whole plan was written for, not a milestone to celebrate mid-project. The real work
+left in the product is the backend column and, phase by phase, turning each "blocked on backend"
+integration cell into "confirmed." Sequence backend phases 0→6 first (closes the MVP), then 7.1
+before the rest of 7.x (it unblocks Phase 3's upload primitive retroactively), then the remaining
+7.x modules in the order listed, then 7.10 last.

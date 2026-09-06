@@ -1,0 +1,74 @@
+name: CI
+
+# Same split frontend/.github/workflows/ci.yml documents: husky's local hooks are developer
+# convenience and bypassable with --no-verify — this is the real gate. Runs `npm run verify`
+# (typecheck, lint, format, secrets scan, unit tests) plus a production build and a Prisma
+# migration dry-run against a real Postgres, on every push and PR.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: schoolos
+          POSTGRES_PASSWORD: schoolos
+          POSTGRES_DB: schoolos
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U schoolos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://schoolos:schoolos@localhost:5432/schoolos?schema=public
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: ci-only-secret-access
+      JWT_REFRESH_SECRET: ci-only-secret-refresh
+      CORS_ORIGINS: http://localhost:5173
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Prisma migrate deploy (dry-run against a real Postgres)
+        run: npx prisma migrate deploy
+
+      - name: Verify (typecheck, lint, format, secrets scan, unit tests)
+        run: npm run verify
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit (high severity only)
+        run: npm run audit
+        continue-on-error: true

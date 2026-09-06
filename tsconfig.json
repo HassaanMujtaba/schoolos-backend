@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    // NestJS's decorator-heavy CommonJS output is still the ecosystem norm (Prisma, most Nest
+    // ecosystem packages assume it) — "node10"/classic resolution, deprecated in TS 6 in favor of
+    // "bundler"/"nodenext", still functions and is what this codebase deliberately uses instead
+    // of "nodenext" (which would require a `.js` extension on every relative import in a
+    // CommonJS-emitting project — real friction for little benefit here). Revisit if a future
+    // TypeScript major actually removes it, not just deprecates it.
+    "ignoreDeprecations": "6.0",
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2022",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "incremental": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "types": ["vitest/globals", "node"]
+  }
+}

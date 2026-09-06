@@ -1,0 +1,184 @@
+// SchoolOS backend — Prisma schema, Phase 0 (Foundation) entities only.
+// See ../implementation-plan.md for what each later phase adds. PRD §45 is the full entity list
+// this schema grows toward; PRD §3 governs the tenant/branch shape every later model follows.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy (PRD §3)
+// ---------------------------------------------------------------------------
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  TRIAL
+}
+
+/// Not itself tenant-scoped (it defines what a tenant *is*) — every other model in this file
+/// carries tenantId and is enforced by PrismaService's query extension. Plan/Subscription/Billing
+/// (PRD §53, Phase 7.9 Platform Console) get their own models when that phase starts; `plan` here
+/// is a placeholder label only.
+model Tenant {
+  id        String       @id @default(uuid())
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(TRIAL)
+  plan      String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  branches  Branch[]
+  users     User[]
+  auditLogs AuditLog[]
+
+  @@map("tenants")
+}
+
+/// PRD §6 Branch Management. Campus/Building/Department (also §6) are deferred to Phase 2's own
+/// migration, once `school-setup` is actually being built — Phase 0 only needs enough of the
+/// tenant/branch shape to prove isolation works.
+model Branch {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  address   String?
+  isMain    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users  User[]
+
+  @@index([tenantId])
+  @@map("branches")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & RBAC (PRD §4, §5) — the Phase 1 auth contract is built on these
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  INVITED
+}
+
+/// One row per person per tenant — PRD §4's role list is not a separate person-type hierarchy,
+/// it's `UserRole` grants against this one table. `passwordHash` is bcrypt (never reversible,
+/// never logged — security-standards A02).
+model User {
+  id           String     @id @default(uuid())
+  tenantId     String
+  branchId     String?
+  email        String
+  phone        String?
+  passwordHash String
+  name         String
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch    Branch?    @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  userRoles UserRole[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("users")
+}
+
+/// A fixed, seeded catalog (`prisma/seed.ts`) matching PRD §4's Platform/School role list — not
+/// a per-tenant custom-role builder. Revisit if a later phase needs tenant-defined roles.
+model Role {
+  id       String @id @default(uuid())
+  key      String @unique
+  label    String
+  isSystem Boolean @default(true)
+
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@map("roles")
+}
+
+/// A fixed, seeded catalog matching the permission-string list in
+/// ../implementation-plan.md ("Permission catalog") — which is itself collected verbatim from
+/// every `frontend/modules/*.md` doc's `RequirePermission`/`can()` usage. Keep this list and that
+/// one in sync; they are the same catalog by construction, not two independent ones.
+model Permission {
+  id    String @id @default(uuid())
+  key   String @unique
+  label String
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+/// Which roles a user holds *within a given tenant*. Carries its own `tenantId` (derivable via
+/// `user.tenantId`, but duplicated here so PrismaService's tenant-scoping extension — which keys
+/// off an explicit column, not a joined relation — can scope this model directly).
+model UserRole {
+  id       String @id @default(uuid())
+  tenantId String
+  userId   String
+  roleId   String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([tenantId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// Audit (PRD §43)
+// ---------------------------------------------------------------------------
+
+/// Written by `AuditInterceptor` (generic) and, for anything needing a real before/after diff, by
+/// feature services directly. No `onDelete: Cascade` relation to `User` for `actorUserId` on
+/// purpose — an audit trail must survive the actor's own record being removed later, so it's a
+/// plain string, not a enforced foreign key.
+///
+/// Append-only in practice, not just by convention: the deploy migration for this table should
+/// grant the application's runtime DB role INSERT/SELECT only, never UPDATE/DELETE — track that
+/// as an infra task alongside this model, not something Prisma's schema can express on its own.
+model AuditLog {
+  id          String   @id @default(uuid())
+  tenantId    String
+  actorUserId String?
+  action      String
+  entityType  String
+  entityId    String?
+  oldValue    Json?
+  newValue    Json?
+  ip          String?
+  userAgent   String?
+  requestId   String?
+  createdAt   DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, entityType, entityId])
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}

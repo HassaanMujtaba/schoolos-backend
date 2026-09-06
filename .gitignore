@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+
+*.log
+.DS_Store
+
+# Prisma generated client lands in node_modules by default; nothing to ignore there specifically,
+# but keep local dev DB artifacts out of version control if a provider ever writes them here.
+/prisma/*.db
