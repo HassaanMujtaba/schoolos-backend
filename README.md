@@ -66,7 +66,7 @@ npm run start:dev
 | `npm run start:dev`                                                          | Nest in watch mode                                                                                          |
 | `npm run build`                                                              | Production build to `dist/`                                                                                 |
 | `npm run typecheck`                                                          | `tsc --noEmit`                                                                                              |
-| `npm run lint` / `lint:fix`                                                  | ESLint (security + typescript-eslint rules — see `eslint.config.js`)                                        |
+| `npm run lint` / `lint:fix`                                                  | ESLint (security + typescript-eslint rules — see `eslint.config.mjs`)                                       |
 | `npm run format` / `format:check`                                            | Prettier                                                                                                    |
 | `npm run secretlint`                                                         | Secret scanning                                                                                             |
 | `npm run test` / `test:watch` / `test:cov`                                   | Vitest unit tests                                                                                           |
