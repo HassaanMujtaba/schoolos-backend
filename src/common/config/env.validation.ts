@@ -1,4 +1,4 @@
-import { plainToInstance } from 'class-transformer';
+import { Type, plainToInstance } from 'class-transformer';
 import {
   IsEnum,
   IsInt,
@@ -25,11 +25,18 @@ class EnvironmentVariables {
   @IsOptional()
   NODE_ENV: NodeEnv = NodeEnv.Development;
 
+  // `@Type(() => Number)` explicitly, rather than relying on `enableImplicitConversion`'s
+  // reflected `design:type` metadata: that metadata is only reliable under a real `tsc` pass —
+  // esbuild/SWC-based transpilation (Vite/vitest's default, and ts-node in transpile-only mode)
+  // doesn't compute it for a property whose type is only inferred from its initializer, so PORT
+  // silently stayed a string and failed `@IsInt()` under those runners. Explicit `@Type()` has no
+  // such dependency.
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(65535)
   @IsOptional()
-  PORT = 3000;
+  PORT: number = 3000;
 
   @IsString()
   DATABASE_URL!: string;
