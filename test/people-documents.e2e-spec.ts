@@ -42,6 +42,12 @@ const ALL_PERMISSIONS = [
   'documents.read',
   'documents.upload',
   'documents.delete',
+  // Phase 6 — the admissions↔fees ordering integration: moving to `fee_payment` generates a real
+  // `Invoice` (`fees.create`-equivalent server-side action, no separate permission needed there),
+  // and this test now records a real payment before `enroll()` before it's allowed to succeed.
+  'fees.read',
+  'fees.create',
+  'fees.collect',
 ];
 
 /**
@@ -155,6 +161,19 @@ describe('People + Documents (e2e)', () => {
       data: { tenantId: tenantAId, classId, name: 'A' },
     });
     sectionId = section.id;
+    // Phase 6 — the admissions "Admissions (full pipeline...)" suite's `fee_payment` transition
+    // now generates a real `Invoice` against this, matching `../implementation-plan.md`'s resolved
+    // admissions↔fees ordering decision.
+    await prisma.feeStructure.create({
+      data: {
+        tenantId: tenantAId,
+        name: 'Admission Fee',
+        type: 'admission',
+        amount: 500,
+        applicableClasses: [classId],
+        discountRules: [],
+      },
+    });
     const academicYear = await prisma.academicYear.create({
       data: {
         tenantId: tenantAId,
@@ -752,6 +771,19 @@ describe('People + Documents (e2e)', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ stage: 'fee_payment' });
       expect(toFeePayment.status).toBe(200);
+      // The transition itself generated a real `Invoice` (Phase 6) — `studentId: null`, since no
+      // `Student` exists yet.
+      const { admissionFeeInvoiceId } = body<{ admissionFeeInvoiceId: string }>(
+        toFeePayment,
+      );
+      expect(admissionFeeInvoiceId).toBeTruthy();
+      const invoiceBeforePayment = await request(app.getHttpServer())
+        .get(`/v1/fees/invoices/${admissionFeeInvoiceId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(invoiceBeforePayment.status).toBe(200);
+      expect(
+        body<{ studentId: string | null }>(invoiceBeforePayment).studentId,
+      ).toBeNull();
 
       const enrollTooEarly = await request(app.getHttpServer())
         .post(`/v1/admissions/${admissionId}/enroll`)
@@ -764,12 +796,43 @@ describe('People + Documents (e2e)', () => {
         .send({ stage: 'enrollment' });
       expect(toEnrollment.status).toBe(200);
 
+      // Still hasn't paid — PRD §7's order is a real server-side gate, not just client sequencing.
+      const enrollBeforePayment = await request(app.getHttpServer())
+        .post(`/v1/admissions/${admissionId}/enroll`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(enrollBeforePayment.status).toBe(400);
+
+      const pay = await request(app.getHttpServer())
+        .post(`/v1/fees/invoices/${admissionFeeInvoiceId}/payments`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          invoiceId: admissionFeeInvoiceId,
+          amount: 500,
+          method: 'cash',
+          referenceId: '',
+        });
+      expect(pay.status).toBe(201);
+
       const enroll = await request(app.getHttpServer())
         .post(`/v1/admissions/${admissionId}/enroll`)
         .set('Authorization', `Bearer ${adminToken}`);
       expect(enroll.status).toBe(200);
       const { studentId } = body<{ studentId: string }>(enroll);
       expect(studentId).toBeTruthy();
+
+      // Reconciled: the invoice keeps `admissionApplicationId` (historical link) *and* now also
+      // carries the new `studentId` — see `Invoice`'s own schema doc comment on the CHECK
+      // constraint this satisfies.
+      const invoiceAfterEnroll = await request(app.getHttpServer())
+        .get(`/v1/fees/invoices/${admissionFeeInvoiceId}`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(body<{ studentId: string }>(invoiceAfterEnroll).studentId).toBe(
+        studentId,
+      );
+      expect(
+        body<{ admissionApplicationId: string }>(invoiceAfterEnroll)
+          .admissionApplicationId,
+      ).toBe(admissionId);
 
       const enrollAgain = await request(app.getHttpServer())
         .post(`/v1/admissions/${admissionId}/enroll`)

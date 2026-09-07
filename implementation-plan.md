@@ -521,8 +521,11 @@ admissions.md` and `modules/fees.md` both flagged this as unresolved. **Decision
 
    Concretely:
    - **Phase 6** (when `Invoice` is built): `Invoice.studentId` becomes nullable, plus a new
-     `Invoice.admissionApplicationId` (also nullable) — a DB `CHECK` constraint enforces exactly
-     one of the two is set on any row, never both, never neither. Fee/outstanding-balance queries
+     `Invoice.admissionApplicationId` (also nullable) — a DB `CHECK` constraint enforces **at
+     least one** of the two is set on any row, never neither (corrected in Phase 6's own section
+     below from an original "exactly one, never both" draft — the reconciliation step two bullets
+     down deliberately leaves both set on a paid, enrolled admission's invoice, which an
+     exclusive-or would make illegal). Fee/outstanding-balance queries
      that currently assume every invoice has a `studentId` need a fallback (show the applicant's
      name off the linked `AdmissionApplication` instead) — flag this explicitly when Phase 6 is
      scoped, it's a real query change, not a schema footnote.
@@ -783,40 +786,128 @@ verification plus the one manual print-preview check, not design.
 
 ---
 
-### Phase 6 — Finance
+### Phase 6 — Finance ✅ built, backend side confirmed
 
 Pairs with **frontend Phase 6 (done) — closes the PRD §65 MVP on the frontend side.**
 [`frontend/modules/fees.md`](../frontend/modules/fees.md).
 
-**Modules:** `fees/`, `accounting/` (minimal — chart of accounts/expenses, not the full PRD §19
-scope yet), `search/`.
+**Status:** `fees/` (fee structures, invoices, payments, outstanding) and `search/` built
+(`src/fees/`, `src/search/`), migration `20260907195655_phase6_fees` applied, unit- and
+e2e-tested against a live Postgres/Redis (`test/fees.e2e-spec.ts`: 33 tests — fee-structure CRUD
 
-**Entities:** `FeeStructure`, `Invoice` (`studentId` nullable + a new `admissionApplicationId`
-nullable, DB `CHECK` enforcing exactly one is set — see Phase 3's resolved admissions↔fees ordering
-decision; this is the concrete schema change that decision commits Phase 6 to), `Payment`,
-`Refund`, `Discount`/`Scholarship`.
+- permission gating + tenant isolation, single-student and bulk-by-class invoice generation with
+  server-computed discount math, payment recording/refund with real `paidAmount`/`status`
+  recomputation, the fee-structure delete-blocked-while-invoices-exist guard, outstanding-balance
+  rollups by student and by class, and `/search`'s per-category permission gating). This phase also
+  required touching `test/people-documents.e2e-spec.ts`'s own Phase 3 "Admissions (full
+  pipeline...)" suite — see the admissions↔fees integration note below — which is why that file's
+  own test count grew this phase, not just this one. `npm run verify` green; the full e2e suite is
+  green except the four pre-existing MinIO-unreachable-in-this-environment Documents tests (Phase
+  3's own documented gap, unrelated to this phase) and the one `health.e2e-spec.ts` assertion that
+  depends on the same gap. A real `nest build` + `node dist/main` boot was curl-verified (helmet
+  headers, `/docs`, and 401s on every new route with no token, confirming the new
+  `FeesModule`/`SearchModule`/`AdmissionsModule → FeesModule` wiring has no circular-DI issue).
 
-**Endpoints:**
+**A real bug in this plan's own two earlier passages, caught and fixed before it shipped:** this
+section's own "Entities" row (below) and the Phase 3 "RESOLVED" note above both said the
+`Invoice.studentId`/`admissionApplicationId` CHECK constraint enforces "exactly one... never both,
+never neither" — but that same Phase 3 note's own reconciliation step says `enroll()` backfills
+`studentId` onto a paid admission invoice **without clearing** `admissionApplicationId` ("keeping
+admissionApplicationId too, as the historical link — never overwritten, never cleared"). An
+exclusive-or constraint makes that documented reconciled state illegal. Built the constraint as
+"at least one, never neither" instead (`invoices_student_or_admission_check` in this phase's
+migration SQL) — every invoice naturally has exactly one set except a reconciled post-enrollment
+admission invoice, which legitimately has both; see `Invoice`'s own schema.prisma doc comment.
+Caught before any real data existed against the stricter version, so fixing it was a
+`prisma migrate reset` (user-confirmed — local dev DB only) rather than a follow-up migration.
+
+**Accounting is not built this phase — a correction to this section's own original "Modules"
+line**, not a scope cut discovered late: `frontend/modules/fees.md`'s own "Open questions" already
+resolved this ("Accounting... is materially larger than fee collection — confirmed Phase 7+, don't
+let it creep into this phase's scope"), and that module doc's endpoint list has zero accounting
+routes. This section's original draft carried an aspirational `accounting/` line anyway, predating
+that resolution — removed here rather than built out into an endpoint nobody's asked for, per this
+plan's own stated philosophy in its introduction.
+
+**The admissions↔fees ordering integration (Phase 3's resolved decision) is wired end-to-end,
+not just schema-ready:** `AdmissionsService.update` now calls `InvoicesService.generateAdmissionInvoice`
+when a `PATCH /admissions/:id` transition lands on `fee_payment` — it looks up the tenant's
+`type: 'admission'` `FeeStructure` applicable to the applicant's target class (400s with a clear
+message if none is configured yet, rather than silently skipping), generates a real `Invoice`
+(`studentId: null`, `admissionApplicationId` set, due immediately), and stamps the id onto
+`admissionFeeInvoiceId`. `AdmissionsService.enroll` now 400s unless that invoice's status is
+`paid`, then — inside the same transaction that creates the `Student` — calls
+`InvoicesService.reconcileAdmissionInvoices` to backfill `studentId` onto every invoice carrying
+that `admissionApplicationId`, keeping `admissionApplicationId` too. `AdmissionsModule` imports
+`FeesModule` (exports `InvoicesService`) for this — one-directional, `FeesModule` knows nothing
+about admissions. This is also why `test/people-documents.e2e-spec.ts`'s own admissions-pipeline
+test changed this phase: it previously asserted `enroll()` succeeds with no fee structure or
+payment involved at all, which is no longer true once this integration is real — updated to seed
+an admission `FeeStructure` and record a real payment before enrolling, and to assert the
+too-early-enroll 400 and the reconciled invoice's final `studentId`/`admissionApplicationId` state.
+
+**A real, honestly-flagged simplification against this section's own original endpoint note, not
+a silent downgrade:** `GET /search` is Postgres `ILIKE` (`contains`/`insensitive`) across
+students/teachers/parents/admissions/invoices, not the `tsvector` + GIN full-text index this
+section originally specified. At current school-scale row counts this is fast enough and needed
+zero new schema; swap for real full-text (the tech-stack table's own noted fallback path,
+"Meilisearch/OpenSearch stays a later swap if search quality becomes a real complaint") once
+result relevance or query volume actually demands it — nothing about the endpoint's request/
+response shape needs to change when that happens. Each result category is gated on that
+category's own read permission (`fees.read` for invoices, `students.read` for students, etc.), not
+on the route itself — same shared-route pattern `LeaveController`/`ReportCardsController` already
+use — so a caller only ever sees categories their role could otherwise read.
+
+**A real design decision on refunds' effect on invoice status, not explicit in either module
+doc:** `fees.md` says refunds are all-or-nothing but doesn't say what a refund does to the
+invoice's displayed status. Resolved by recomputing `paidAmount`/`status` from every
+**non-refunded** `Payment` row every time one is recorded or refunded (`InvoicesService.
+recomputeInvoiceTotals`) — a refunded payment simply drops out of the sum, so a `paid` invoice
+with its only payment refunded goes back to `pending`, not to some new "refunded" invoice status
+(`InvoiceStatus` has no such member — refund state lives entirely on `Payment.refunded`).
+
+**Module:** `fees/` (fee structures, invoices, payments, outstanding), `search/`.
+
+**Entities:** `FeeStructure` (`discountRules` JSON, same trade-off as `Student.
+emergencyContacts`), `Invoice` (`studentId` nullable + a new `admissionApplicationId` nullable, DB
+`CHECK` enforcing **at least one** is set, not exactly one — see the corrected note above),
+`Payment` (`refunded`/`refundedAt`, no separate `Refund` entity — a refund is a flag on the
+`Payment` it reverses, not its own row, since refunds are all-or-nothing per `fees.md`'s own
+resolved scope). No separate `Discount`/`Scholarship` entities — `FeeStructure.discountRules` JSON
+covers both, same reasoning `school-setup.md`'s nested-array resolution already established.
+
+**Endpoints (as actually built):**
 
 ```
-CRUD /fees/structures
-POST /fees/invoices                 single student or bulk-by-class
-POST /fees/invoices/:id/payments
-POST /fees/payments/:id/refund
-GET  /fees/payments/:id/receipt
-GET  /fees/outstanding              must handle admission-linked invoices with studentId: null —
-                                     group/display by the linked AdmissionApplication's applicant
-                                     name instead of a student record that may not exist yet
-GET  /search?q=&type=                cross-entity (students, invoices, staff, ...) — Postgres
-                                     full-text (`tsvector` + GIN index) per PRD §42
+CRUD /fees/structures                fees.create gates both create and edit (no separate
+                                      fees.update in the seeded catalog — matches
+                                      FeeStructuresTable.tsx's own usePermission('fees.create')
+                                      covering both actions)
+POST /fees/invoices                  single student or bulk-by-class (mode: 'student'|'class');
+                                      400s if the fee structure doesn't apply to the target class
+                                      (FeeStructure.applicableClasses)
+GET  /fees/invoices, /fees/invoices/:id   ?studentId=&classId=&status=
+POST /fees/invoices/:id/payments     fees.collect; body invoiceId must match the route (same
+                                      "route id wins" convention as ExaminationsService's examId)
+POST /fees/payments/:id/refund       fees.refund; 409s if already refunded
+GET  /fees/payments, /fees/payments/:id/receipt
+GET  /fees/outstanding               ?groupBy=student|class; groups an admission-linked invoice
+                                      (studentId: null) by its AdmissionApplication's applicant
+                                      name instead of a missing student record
+GET  /search?q=&type=                ILIKE across students/teachers/parents/admissions/invoices,
+                                      not full-text — see the flagged simplification above; each
+                                      category gated on that category's own read permission
 ```
 
-**Integration task — this is the MVP milestone.** Once this phase's endpoints are live and
-`frontend`'s Phase 6 screens are re-verified against them (fee structures → invoice → payment →
-receipt → outstanding-balances dashboard, plus `CommandPalette`'s real `/search`), **PRD §65's MVP
-is genuinely end-to-end**, not just frontend-complete-against-assumptions. Verify the full flow
+**Integration task — this is the MVP milestone.** Once `frontend`'s Phase 6 screens are
+re-verified against these real endpoints (fee structures → invoice → payment → receipt →
+outstanding-balances dashboard, plus `CommandPalette`'s real `/search`), **PRD §65's MVP is
+genuinely end-to-end**, not just frontend-complete-against-assumptions — verify the full flow
 together (admission → enrollment → attendance → homework → exam → fee payment), not each module in
-isolation — the frontend plan calls this out explicitly.
+isolation, per the frontend plan's own call-out. `frontend/src/features/fees/api.ts`'s `Invoice`
+type is currently typed `studentId: string` (non-nullable); this backend honestly returns
+`string | null` for a pre-enrollment admission invoice — `fees.md`'s own "Open questions" already
+flagged this exact frontend-side follow-up as non-blocking, still true here.
 
 ---
 
@@ -1146,25 +1237,25 @@ The actual side-by-side status, phase by phase. Update this table as each phase'
 completes — it's the single place that answers "is this module really done, or just done on one
 side?"
 
-| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                         | Integration                                                                                                                               |
-| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                | — (no frontend-facing surface)                                                                                                            |
-| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                               | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                              |
-| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                    | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                    |
-| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time) | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending  |
-| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                    | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending        |
-| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                    | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending |
-| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                                                  | ⏳ blocked on backend — **this is the real MVP integration milestone**                                                                    |
-| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
-| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
-| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
-| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
-| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; fee-linkage decision needed first                                                                                  |
-| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                     |
-| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
-| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
-| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                            |
-| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                  | ⏳ backend's tool-calling layer must land before either side does feature work                                                            |
+| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                         | Integration                                                                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                | — (no frontend-facing surface)                                                                                                                                                                             |
+| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                               | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                                                                                               |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                    | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                                                                                     |
+| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time) | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending                                                                   |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                    | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending                                                                         |
+| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                    | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending                                                                  |
+| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ✅ built + e2e-tested against live Postgres/Redis (33 tests) + confirmed the admissions↔fees integration end-to-end             | ⏳ backend confirmed (see Phase 6 notes above) — **PRD §65 MVP genuinely end-to-end once frontend's Phase 6 screens are re-verified against these real endpoints**; cross-stack verification still pending |
+| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; fee-linkage decision needed first                                                                                                                                                   |
+| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                                                                                      |
+| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                                                                                             |
+| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                  | ⏳ backend's tool-calling layer must land before either side does feature work                                                                                                                             |
 
 **Reading this table:** the frontend column is almost entirely "done" already — that's the starting
 condition this whole plan was written for, not a milestone to celebrate mid-project. The real work

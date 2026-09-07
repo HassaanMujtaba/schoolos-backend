@@ -52,6 +52,8 @@ model Tenant {
   substitutions    Substitution[]
   homework         Homework[]
   exams            Exam[]
+  feeStructures    FeeStructure[]
+  invoices         Invoice[]
 
   @@map("tenants")
 }
@@ -504,6 +506,7 @@ model Student {
   leaveRequests       LeaveRequest[]
   homeworkSubmissions HomeworkSubmission[]
   examMarks           ExamMark[]
+  invoices            Invoice[]
 
   @@unique([tenantId, admissionNumber])
   @@index([tenantId])
@@ -635,12 +638,17 @@ model AdmissionApplication {
   /// problem for this consumer, unlike Students) are a frontend-wiring follow-up once
   /// `DocumentsPanel` moves off this placeholder, not a schema change.
   documentNames         String[]          @default([])
+  /// Still a plain id column, not a Prisma relation — unlike `Invoice.admissionApplicationId`
+  /// below (a real FK, since `AdmissionApplication` already existed when `Invoice` was added in
+  /// Phase 6), this field predates `Invoice`'s existence (Phase 3) and nothing in Phase 6's scope
+  /// calls for converting it; `invoices` below is the queryable side of that relationship.
   admissionFeeInvoiceId String?
   enrolledStudentId     String?
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
 
   @@index([tenantId])
   @@index([stage])
@@ -1023,6 +1031,156 @@ model ExamMark {
   @@index([tenantId])
   @@index([studentId])
   @@map("exam_marks")
+}
+
+// ---------------------------------------------------------------------------
+// Fees & Finance (PRD §18, Phase 6 — closes the PRD §65 MVP) —
+// `frontend/modules/fees.md` "Backend dependencies"/"Data model" is the source contract.
+// Accounting (§19: chart of accounts, expenses, vendors) is **not** built here — `fees.md`'s own
+// "Open questions" resolves it as "confirmed Phase 7+, don't let it creep into this phase's
+// scope", and the module doc's endpoint list has no accounting routes at all; the earlier
+// aspirational `accounting/` line in `../implementation-plan.md`'s Phase 6 "Modules" list predates
+// that resolution and is corrected in this phase's own section there.
+// ---------------------------------------------------------------------------
+
+/// §18 Fee Types — `frontend/src/features/fees/schemas.ts`'s `FEE_TYPES`, same lowercase-enum-
+/// member-matches-frontend-string convention as `SubjectType`.
+enum FeeType {
+  admission
+  tuition
+  transport
+  library
+  lab
+  exam
+  sports
+  uniform
+  other
+}
+
+/// §18 Payment Methods — `schemas.ts`'s `PAYMENT_METHODS`.
+enum PaymentMethod {
+  cash
+  bank_transfer
+  card
+  online_gateway
+  mobile_wallet
+}
+
+enum InvoiceStatus {
+  pending
+  partial
+  paid
+  overdue
+  cancelled
+}
+
+/// §18 Fee structure config (admin-defined). `discountRules` is `DiscountRule[]` JSON
+/// (`{ label, kind: 'flat'|'percentage', value }`), same never-queried-individually trade-off as
+/// `Student.emergencyContacts` — always read/written as one whole list per `FeeStructureForm`'s
+/// `useFieldArray` shape, never its own sub-resource. Installment plans and late-fee rules are
+/// explicitly out of MVP scope (`fees.md`'s own "Open questions") — no columns for either; adding
+/// them later is additive, not a rework, the same bet `AcademicYear.terms`/`.holidays` already
+/// made.
+model FeeStructure {
+  id                String   @id @default(uuid())
+  tenantId          String
+  name              String
+  type              FeeType
+  amount            Float
+  applicableClasses String[]
+  discountRules     Json     @default("[]")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@index([tenantId])
+  @@map("fee_structures")
+}
+
+/// §18 Invoices. `studentId`/`admissionApplicationId` are both nullable — a pre-enrollment
+/// admission-fee invoice has no `Student` row yet (`../implementation-plan.md`'s resolved Phase 3
+/// admissions↔fees ordering decision: Fee Payment runs before Enrollment) — so **at least one of
+/// the two must be set, never neither**, enforced by a DB `CHECK` constraint added by hand in this
+/// phase's migration SQL (Prisma has no declarative check-constraint syntax as of this schema's
+/// Prisma version, same reason `tenant-scoping.ts`'s five-operation split is hand-documented code
+/// rather than schema-expressed). Deliberately not an exclusive-or: `AdmissionsService.enroll`
+/// reconciles a paid admission invoice once the `Student` is actually created by backfilling
+/// `studentId` onto every `Invoice` carrying that `admissionApplicationId` *without* clearing
+/// `admissionApplicationId` (kept as the historical link) — so a reconciled row legitimately has
+/// both set. Every other invoice naturally has exactly one, never both — this constraint just
+/// doesn't force that as a rule.
+///
+/// `lineItems` is `InvoiceLineItem[]` JSON (`{ label, amount }`), same trade-off as
+/// `FeeStructure.discountRules` — display-only, never the authoritative number. `totalAmount` is
+/// computed server-side once at generation time from the fee structure + its discount rules
+/// (`fee-calc.ts`, mirroring `frontend/src/features/fees/lib/invoiceCalc.ts`'s own math so the two
+/// sides agree); `paidAmount`/`status` are recomputed from real `Payment` rows every time one is
+/// recorded or refunded — never trusted from the client, matching every other server-computed
+/// field in this schema (`Exam`'s grade/GPA/rank, `AdmissionApplication`'s stage machine).
+///
+/// **A real, flagged limit, not a bug:** `status` is persisted at write time
+/// (pending/partial/paid) and only re-checked against `dueDate` for the `overdue` transition on
+/// read (`InvoicesService`'s own doc comment) — there is no scheduled sweep job flipping stale
+/// invoices to `overdue` in the database itself (BullMQ scheduled jobs are Phase 7+ scope per
+/// `../implementation-plan.md`'s tech-stack table). `GET /fees/invoices?status=overdue` therefore
+/// filters on the last-computed stored value, which can lag a display-time recompute by up to one
+/// page load — acceptable for MVP, worth a real scheduled job once background workers exist.
+model Invoice {
+  id                     String        @id @default(uuid())
+  tenantId               String
+  studentId              String?
+  admissionApplicationId String?
+  feeStructureId         String
+  lineItems              Json          @default("[]")
+  dueDate                DateTime      @db.Date
+  status                 InvoiceStatus @default(pending)
+  totalAmount            Float
+  paidAmount             Float         @default(0)
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  tenant               Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  student              Student?              @relation(fields: [studentId], references: [id], onDelete: SetNull)
+  admissionApplication AdmissionApplication? @relation(fields: [admissionApplicationId], references: [id], onDelete: SetNull)
+  feeStructure         FeeStructure          @relation(fields: [feeStructureId], references: [id])
+  payments             Payment[]
+
+  @@index([tenantId])
+  @@index([studentId])
+  @@index([admissionApplicationId])
+  @@index([status])
+  @@map("invoices")
+}
+
+/// §18 Payments. No explicit `tenant Tenant @relation` here, same high-volume-leaf trade-off
+/// `AttendanceRecord`/`ExamMark` already make (`invoiceId` carries the real relation, `tenantId`
+/// stays a plain scoped column still enforced by `PrismaService`'s tenant-scoping extension via
+/// `TENANT_SCOPED_MODELS`, which only needs the column, not a Prisma relation object). `refunded`
+/// is all-or-nothing — `fees.md`'s own "Open questions": "Refunds are all-or-nothing... no
+/// partial-refund amount field" — refunding reverses this payment's full `amount` off the
+/// invoice's `paidAmount`, never a partial sum; add a `refundedAmount` column instead of mutating
+/// this shape if partial refunds are ever scoped.
+model Payment {
+  id            String        @id @default(uuid())
+  tenantId      String
+  invoiceId     String
+  amount        Float
+  method        PaymentMethod
+  referenceId   String        @default("")
+  receiptNumber String
+  paidAt        DateTime      @default(now())
+  refunded      Boolean       @default(false)
+  refundedAt    DateTime?
+  createdAt     DateTime      @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, receiptNumber])
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@map("payments")
 }
 
 // ---------------------------------------------------------------------------

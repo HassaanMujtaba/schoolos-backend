@@ -24,6 +24,8 @@ import { TimetableModule } from './timetable/timetable.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { HomeworkModule } from './homework/homework.module';
 import { ExaminationsModule } from './examinations/examinations.module';
+import { FeesModule } from './fees/fees.module';
+import { SearchModule } from './search/search.module';
 
 @Module({
   imports: [
@@ -55,7 +57,12 @@ import { ExaminationsModule } from './examinations/examinations.module';
     HomeworkModule,
     // Phase 5 — Examinations.
     ExaminationsModule,
-    // Phase 6+ feature modules mount here, in the order listed in
+    // Phase 6 — Fees & Finance (closes the PRD §65 MVP). AdmissionsModule (above) imports
+    // FeesModule directly for the admissions↔fees ordering integration — Nest resolves that
+    // regardless of this array's order, listed here to match the phase table.
+    FeesModule,
+    SearchModule,
+    // Phase 7+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [

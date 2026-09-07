@@ -9,6 +9,7 @@ import { AdmissionApplication, AdmissionStage, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RequestContextService } from '../common/context/request-context.service';
+import { InvoicesService } from '../fees/invoices.service';
 import { PagedResult } from '../common/pagination/list-query.dto';
 import { paginate, toSkipTake } from '../common/pagination/paginate';
 import { formatDateOnly, parseDateOnly } from '../common/dates/date-only';
@@ -52,6 +53,7 @@ export class AdmissionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly requestContext: RequestContextService,
+    private readonly invoicesService: InvoicesService,
   ) {}
 
   async list(
@@ -118,10 +120,22 @@ export class AdmissionsService {
       await this.assertClassExists(dto.applicant.classAppliedFor);
     }
 
+    // `../../implementation-plan.md`'s resolved Phase 3 admissions↔fees ordering decision: moving
+    // into `fee_payment` is what generates the real `Invoice` (there is no separate "mark fee
+    // payment" endpoint — this generic `PATCH` is where that state-machine action lives).
+    // `generateAdmissionInvoice` is idempotent, so a stage transition that somehow re-enters this
+    // once (it can't via `assertStageTransitionAllowed`'s one-step-forward rule today, but nothing
+    // stops a future stage-machine change relying on that) reuses the existing invoice.
+    const admissionFeeInvoiceId =
+      dto.stage === 'fee_payment'
+        ? (await this.invoicesService.generateAdmissionInvoice(existing)).id
+        : undefined;
+
     const admission = await this.prisma.admissionApplication.update({
       where: { id },
       data: {
         ...(dto.stage ? { stage: dto.stage } : {}),
+        ...(admissionFeeInvoiceId ? { admissionFeeInvoiceId } : {}),
         ...(dto.applicant
           ? {
               applicantName: dto.applicant.name,
@@ -224,6 +238,22 @@ export class AdmissionsService {
     if (admission.enrolledStudentId) {
       throw new ConflictException(`Admission ${id} is already enrolled`);
     }
+    // PRD §7's order enforced as a real business rule, not just client stepper sequencing — see
+    // `../../implementation-plan.md`'s resolved Phase 3 admissions↔fees ordering decision. Reaching
+    // the `enrollment` stage already requires having passed through `fee_payment`
+    // (`assertStageTransitionAllowed`'s one-step-forward rule), which is what generates
+    // `admissionFeeInvoiceId` — a missing one here means that never actually happened (a stale
+    // admission created before this integration existed, say), fail closed either way.
+    if (
+      !admission.admissionFeeInvoiceId ||
+      !(await this.invoicesService.isInvoicePaid(
+        admission.admissionFeeInvoiceId,
+      ))
+    ) {
+      throw new BadRequestException(
+        `Admission ${id}'s admission fee has not been paid yet`,
+      );
+    }
 
     const [section, academicYear] = await Promise.all([
       this.prisma.section.findFirst({
@@ -281,6 +311,10 @@ export class AdmissionsService {
         where: { id },
         data: { enrolledStudentId: created.id },
       });
+      // Backfills `studentId` onto the admission-fee invoice(s) without clearing
+      // `admissionApplicationId` — see `Invoice`'s own schema.prisma doc comment on why the CHECK
+      // constraint permits both being set.
+      await this.invoicesService.reconcileAdmissionInvoices(tx, id, created.id);
       return created;
     });
 

@@ -46,4 +46,8 @@ export const TENANT_SCOPED_MODELS = new Set<string>([
   // Phase 5 — Examinations (see ../../../implementation-plan.md)
   'Exam',
   'ExamMark',
+  // Phase 6 — Fees & Finance (see ../../../implementation-plan.md)
+  'FeeStructure',
+  'Invoice',
+  'Payment',
 ]);
