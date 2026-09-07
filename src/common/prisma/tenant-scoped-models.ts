@@ -26,4 +26,14 @@ export const TENANT_SCOPED_MODELS = new Set<string>([
   'SchoolClass',
   'Section',
   'Subject',
+  // Phase 3 — People + Documents primitive (see ../../../implementation-plan.md)
+  'Parent',
+  'ParentStudentLink',
+  'Student',
+  'Enrollment',
+  'Teacher',
+  'TeacherAssignment',
+  'AdmissionApplication',
+  'Document',
+  'DocumentVersion',
 ]);

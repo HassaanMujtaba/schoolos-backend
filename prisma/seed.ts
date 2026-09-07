@@ -44,12 +44,26 @@ const PERMISSIONS: string[] = [
   'students.update',
   'students.delete',
   'students.export',
+  // Phase 3 (People) — corrected the same way Phase 2's school-setup row was: the
+  // `parents.manage`/`teachers.manage`/`admissions.manage` buckets below were this catalog's
+  // original draft, but the actually-built frontend (`ChildLinkPanel.tsx`, `StagePanels.tsx`,
+  // `TeacherForm`/`AssignmentPanel`, all via `usePermission`) calls granular per-action strings
+  // instead — see ../implementation-plan.md's Phase 3 section.
   'parents.read',
-  'parents.manage',
+  'parents.create',
+  'parents.update',
+  'parents.delete',
   'teachers.read',
-  'teachers.manage',
+  'teachers.create',
+  'teachers.update',
+  'teachers.delete',
+  'teachers.assign',
   'admissions.read',
-  'admissions.manage',
+  'admissions.create',
+  'admissions.update',
+  'admissions.review',
+  'admissions.approve',
+  'admissions.reject',
   // Phase 2 (School Setup & Core Entities) — corrected from the placeholder
   // `school-setup.manage` bucket to the granular strings the built frontend actually calls
   // `usePermission`/`RequirePermission` with (`router.tsx`, `navConfig.ts`, and every

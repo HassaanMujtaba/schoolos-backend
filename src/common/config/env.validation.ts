@@ -61,21 +61,28 @@ class EnvironmentVariables {
   @IsString()
   CORS_ORIGINS!: string; // comma-separated
 
+  // Required as of Phase 3: `documents/` (the shared upload primitive `students`/`admissions`
+  // depend on) mounts unconditionally in AppModule, not behind a feature flag, so a boot with no
+  // storage configured should fail loudly at startup — same "fail fast" reasoning as DATABASE_URL/
+  // REDIS_URL above — rather than StorageService discovering it's misconfigured on the first real
+  // upload request. Optional through Phase 0–2, when nothing used them yet.
   @IsString()
-  @IsOptional()
-  S3_ENDPOINT?: string;
+  S3_ENDPOINT!: string;
 
   @IsString()
-  @IsOptional()
-  S3_BUCKET?: string;
+  S3_BUCKET!: string;
 
   @IsString()
-  @IsOptional()
-  S3_ACCESS_KEY_ID?: string;
+  S3_ACCESS_KEY_ID!: string;
 
   @IsString()
+  S3_SECRET_ACCESS_KEY!: string;
+
+  // No real region in dev (MinIO ignores it); required by the AWS SDK client constructor
+  // regardless, so give it a harmless default rather than making every dev set it.
+  @IsString()
   @IsOptional()
-  S3_SECRET_ACCESS_KEY?: string;
+  S3_REGION = 'us-east-1';
 }
 
 export function validateEnv(

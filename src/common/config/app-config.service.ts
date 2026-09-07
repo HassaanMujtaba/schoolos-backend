@@ -53,6 +53,30 @@ export class AppConfigService {
       .filter(Boolean);
   }
 
+  // S3/MinIO — documents/ (Phase 3). Optional at the env-validation level (a deploy that never
+  // touches file upload shouldn't be forced to configure storage), but `StorageService` throws its
+  // own clear error the first time something actually needs it and a value is missing, same
+  // "fail fast, not deep in a service with `undefined`" reasoning as `getOrThrow` below.
+  get s3Endpoint(): string {
+    return this.getOrThrow('S3_ENDPOINT');
+  }
+
+  get s3Bucket(): string {
+    return this.getOrThrow('S3_BUCKET');
+  }
+
+  get s3AccessKeyId(): string {
+    return this.getOrThrow('S3_ACCESS_KEY_ID');
+  }
+
+  get s3SecretAccessKey(): string {
+    return this.getOrThrow('S3_SECRET_ACCESS_KEY');
+  }
+
+  get s3Region(): string {
+    return this.config.get<string>('S3_REGION', 'us-east-1');
+  }
+
   private getOrThrow(key: string): string {
     const value = this.config.get<string>(key);
     if (!value) {

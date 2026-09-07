@@ -5,7 +5,9 @@ import { AppConfigModule } from './common/config/app-config.module';
 import { RequestContextModule } from './common/context/request-context.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { RedisModule } from './common/redis/redis.module';
+import { StorageModule } from './common/storage/storage.module';
 import { PermissionsGuard } from './common/guards/permissions.guard';
+import { AnyPermissionsGuard } from './common/guards/any-permissions.guard';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
@@ -13,6 +15,11 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { UsersModule } from './users/users.module';
 import { TenantsModule } from './tenants/tenants.module';
 import { SchoolSetupModule } from './school-setup/school-setup.module';
+import { DocumentsModule } from './documents/documents.module';
+import { StudentsModule } from './students/students.module';
+import { ParentsModule } from './parents/parents.module';
+import { TeachersModule } from './teachers/teachers.module';
+import { AdmissionsModule } from './admissions/admissions.module';
 
 @Module({
   imports: [
@@ -22,6 +29,7 @@ import { SchoolSetupModule } from './school-setup/school-setup.module';
     RequestContextModule,
     PrismaModule,
     RedisModule,
+    StorageModule,
     ThrottlerModule.forRoot({
       throttlers: [{ ttl: 60_000, limit: 100 }],
     }),
@@ -30,7 +38,14 @@ import { SchoolSetupModule } from './school-setup/school-setup.module';
     AuthModule,
     TenantsModule,
     SchoolSetupModule,
-    // Phase 3+ feature modules mount here, in the order listed in
+    // Phase 3 — People + Documents primitive. DocumentsModule mounts first: students/ and
+    // admissions/ both reference it (response DTOs read Document rows), not the other way round.
+    DocumentsModule,
+    StudentsModule,
+    ParentsModule,
+    TeachersModule,
+    AdmissionsModule,
+    // Phase 4+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [
@@ -43,6 +58,8 @@ import { SchoolSetupModule } from './school-setup/school-setup.module';
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     // Reads the permission set JwtAuthGuard just resolved from the verified token.
     { provide: APP_GUARD, useClass: PermissionsGuard },
+    // OR counterpart to PermissionsGuard — see @RequireAnyPermission's own doc comment.
+    { provide: APP_GUARD, useClass: AnyPermissionsGuard },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
   ],
 })

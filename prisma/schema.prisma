@@ -43,6 +43,11 @@ model Tenant {
   classes       SchoolClass[]
   sections      Section[]
   subjects      Subject[]
+  parents       Parent[]
+  students      Student[]
+  teachers      Teacher[]
+  admissions    AdmissionApplication[]
+  documents     Document[]
 
   @@map("tenants")
 }
@@ -258,6 +263,7 @@ model AcademicYear {
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   terms    Term[]
   holidays Holiday[]
+  students Student[]
 
   @@index([tenantId])
   @@map("academic_years")
@@ -304,6 +310,7 @@ model SchoolClass {
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   sections Section[]
+  students Student[]
 
   @@index([tenantId])
   @@map("classes")
@@ -324,6 +331,7 @@ model Section {
 
   tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   schoolClass SchoolClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  students    Student[]
 
   @@index([tenantId])
   @@index([classId])
@@ -358,6 +366,336 @@ model Subject {
 
   @@index([tenantId])
   @@map("subjects")
+}
+
+// ---------------------------------------------------------------------------
+// People (PRD §8/§9/§10, Phase 3) —
+// `frontend/modules/students.md` / `parents.md` / `teachers.md` "Data model / key fields" is the
+// source contract. Two corrections made against the real frontend source (not just the module
+// docs), same discipline as Phase 2's "Phase 2 correction" note:
+//
+// 1. No separate `Guardian` entity (this schema's earlier draft, and `../implementation-plan.md`'s
+//    original Phase 3 entity list, both had one) — `features/parents/api.ts`'s `linkChild` takes a
+//    single `relation` string (`ChildLinkPanel.tsx`'s `RELATIONS = ['father', 'mother', 'guardian',
+//    'other']`), so "parent" vs. "guardian" is one join table split by `relation`, not two entities.
+// 2. No separate `AdmissionInquiry` entity — `features/admissions/api.ts`'s `Admission` is one
+//    record carrying a `stage` field through the whole pipeline (inquiry → ... → enrollment), not
+//    an inquiry promoted into a distinct application record. Modeled here as one
+//    `AdmissionApplication` table.
+// ---------------------------------------------------------------------------
+
+enum FamilyRelation {
+  father
+  mother
+  guardian
+  other
+}
+
+/// §9 Parent Management. `email`/`address` default to `""` rather than nullable — matches
+/// `parentSchema`'s always-a-string fields (email is optional *content*, `.or(z.literal(''))`, not
+/// an optional *field*).
+model Parent {
+  id        String   @id @default(uuid())
+  tenantId  String
+  /// Links this profile to the portal login it belongs to (`GET /parents/me/children`'s "me").
+  /// Nullable and unset by anything in this phase — **no endpoint provisions a Parent's portal
+  /// User account yet**; `auth.md`'s login flow and this admin-side `POST /parents` are two
+  /// separate, currently-unconnected things (creating a Parent profile here doesn't create a
+  /// login). `parents.service.ts`'s `getMyChildren` 404s until that provisioning flow exists —
+  /// documented as an open gap rather than guessed at, same as Phase 1's identifier-collision note
+  /// in `auth.service.ts`.
+  userId    String?  @unique
+  name      String
+  email     String   @default("")
+  phone     String
+  address   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  links  ParentStudentLink[]
+
+  @@index([tenantId])
+  @@map("parents")
+}
+
+/// The parent↔student many-to-many, `relation`-typed (see this section's header comment). A
+/// student's `parents[]` vs. `guardians[]` (`students.md`'s Family tab) is this same table split by
+/// `relation !== 'guardian'` vs. `=== 'guardian'` at read time in `students.service.ts` — there is
+/// no separate storage for the two.
+model ParentStudentLink {
+  id        String         @id @default(uuid())
+  tenantId  String
+  parentId  String
+  studentId String
+  relation  FamilyRelation
+
+  parent  Parent  @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([parentId, studentId])
+  @@index([tenantId])
+  @@index([studentId])
+  @@map("parent_student_links")
+}
+
+enum StudentGender {
+  male
+  female
+  other
+}
+
+// PRD §8 doesn't pin an exact enum — matches `STUDENT_STATUSES` in
+// `frontend/src/features/students/schemas.ts` exactly (the frontend's own comment there says the
+// same: "extend once backend publishes the real values").
+enum StudentStatus {
+  active
+  inactive
+  graduated
+  transferred
+}
+
+/// §8 Student Management — the most-referenced entity in the system (`students.md`'s own framing).
+/// `classId`/`sectionId`/`academicYearId` are the student's *current* placement; `enrollments`
+/// below is the append-only history `EnrollmentHistoryEntry[]` renders from (see `Enrollment`'s own
+/// doc comment). `subjects[]`/`classTeacherId` in the frontend's `Student` type are computed at
+/// read time, not stored here — see `students.service.ts`.
+model Student {
+  id                String        @id @default(uuid())
+  tenantId          String
+  admissionNumber   String
+  name              String
+  photoUrl          String?
+  dob               DateTime      @db.Date
+  gender            StudentGender
+  address           String        @default("")
+  nationality       String        @default("")
+  language          String        @default("")
+  classId           String
+  sectionId         String
+  academicYearId    String
+  status            StudentStatus @default(active)
+  medicalInfo       String        @default("")
+  /// `EmergencyContact[]` (`{ name, relation, phone }`) — a JSON column, not a child table: never
+  /// queried/filtered on individually, always read/written as one whole list per
+  /// `emergencyContactSchema`'s `useFieldArray` shape, the same call `School`'s free-text fields
+  /// make for data nothing in the product searches by.
+  emergencyContacts Json          @default("[]")
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolClass  SchoolClass         @relation(fields: [classId], references: [id])
+  section      Section             @relation(fields: [sectionId], references: [id])
+  academicYear AcademicYear        @relation(fields: [academicYearId], references: [id])
+  enrollments  Enrollment[]
+  familyLinks  ParentStudentLink[]
+
+  @@unique([tenantId, admissionNumber])
+  @@index([tenantId])
+  @@index([classId])
+  @@index([sectionId])
+  @@map("students")
+}
+
+/// Append-only snapshot written every time a `Student`'s class/section/academic year changes
+/// (including the row created alongside the student itself) — `students.md`'s
+/// `enrollmentHistory: EnrollmentHistoryEntry[]`. Never updated or deleted, only inserted;
+/// `students.service.ts` is the only writer.
+model Enrollment {
+  id             String   @id @default(uuid())
+  tenantId       String
+  studentId      String
+  academicYearId String
+  classId        String
+  sectionId      String
+  createdAt      DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([studentId])
+  @@map("enrollments")
+}
+
+/// §10 Teacher Management. `subjectIds` is a plain string array, same trade-off as `Subject.
+/// classIds` (referential integrity enforced in `teachers.service.ts`, not a DB foreign key) — the
+/// subjects a teacher is generally qualified to teach, distinct from `TeacherAssignment` below
+/// (the actual subject/class/section timetable assignment).
+model Teacher {
+  id              String   @id @default(uuid())
+  tenantId        String
+  name            String
+  email           String   @default("")
+  phone           String   @default("")
+  employeeId      String
+  experienceYears Int?
+  /// `Qualification[]` (`{ degree, institution, year }`) — JSON, same reasoning as `Student.
+  /// emergencyContacts`.
+  qualifications  Json     @default("[]")
+  subjectIds      String[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignments TeacherAssignment[]
+
+  @@unique([tenantId, employeeId])
+  @@index([tenantId])
+  @@map("teachers")
+}
+
+/// `Assignment { teacherId, subjectId, classId, sectionId }` per `teachers.md`'s data model —
+/// subject/class/section referential integrity enforced at the application layer
+/// (`teachers.service.ts`), same `classIds`/`subjectIds` trade-off as above.
+model TeacherAssignment {
+  id        String @id @default(uuid())
+  tenantId  String
+  teacherId String
+  subjectId String
+  classId   String
+  sectionId String
+
+  teacher Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([teacherId])
+  @@map("teacher_assignments")
+}
+
+// Order matters — the pipeline sequence itself, matching `ADMISSION_STAGES` in
+// `frontend/src/features/admissions/schemas.ts` verbatim.
+enum AdmissionStage {
+  inquiry
+  application
+  documents
+  review
+  entrance_test
+  interview
+  acceptance
+  fee_payment
+  enrollment
+}
+
+enum AdmissionDecision {
+  pending
+  accepted
+  rejected
+  waitlisted
+}
+
+/// §7 Admission Management — one record for the whole pipeline (see this section's header
+/// comment). `admissionFeeInvoiceId` stays `null` until Phase 6 (Finance) exists — see
+/// `../implementation-plan.md`'s resolved admissions↔fees ordering decision; `enrolledStudentId` is
+/// set by `POST /admissions/:id/enroll` once the `Student` row is created. Neither is a real Prisma
+/// relation (both point at rows that may not exist yet, or at a model — `Invoice` — that doesn't
+/// exist in this schema until Phase 6), so both stay plain nullable id columns.
+model AdmissionApplication {
+  id                    String            @id @default(uuid())
+  tenantId              String
+  stage                 AdmissionStage    @default(inquiry)
+  applicantName         String
+  applicantDob          DateTime          @db.Date
+  /// A `SchoolClass` id, not free text (`InquiryForm.tsx`'s `classAppliedFor` is a `<Select>` over
+  /// real classes) — validated against `SchoolClass` in `admissions.service.ts` at write time, same
+  /// `classIds`/`subjectIds` no-DB-foreign-key trade-off as `Subject`/`Teacher` above.
+  classAppliedFor       String
+  contactPhone          String
+  contactEmail          String            @default("")
+  address               String            @default("")
+  previousSchool        String            @default("")
+  notes                 String            @default("")
+  entranceTestScore     Float?
+  interviewNotes        String            @default("")
+  applicationScore      Float?
+  decision              AdmissionDecision @default(pending)
+  decisionReason        String            @default("")
+  /// Placeholder file-name list only — `PATCH /admissions/:id/documents` doesn't perform a real
+  /// upload yet (`admissions/api.ts`'s own comment: no confirmed `POST /documents/upload` at the
+  /// time it was built). Real `Document` rows (category `admission`, `ownerId` = this application's
+  /// id — already available from the `inquiry` stage on, no two-step upload-before-owner-exists
+  /// problem for this consumer, unlike Students) are a frontend-wiring follow-up once
+  /// `DocumentsPanel` moves off this placeholder, not a schema change.
+  documentNames         String[]          @default([])
+  admissionFeeInvoiceId String?
+  enrolledStudentId     String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([stage])
+  @@map("admission_applications")
+}
+
+// ---------------------------------------------------------------------------
+// Documents (PRD §31, Phase 3 — build early per `../implementation-plan.md`; the dedicated browse/
+// search library and certificates half are Phase 7.1) —
+// `frontend/modules/documents-certificates.md` "Backend dependencies" is the source contract.
+// ---------------------------------------------------------------------------
+
+enum DocumentCategory {
+  admission
+  student
+  employee
+  medical
+  contract
+  certificate
+  report
+}
+
+/// The owning record (one per logical file); `versions` below holds the actual content pointers.
+/// `ownerId`/`ownerLabel` are nullable free text, not a relation — matches
+/// `documentUploadSchema`'s optional fields exactly (`documents/schemas.ts`'s own comment: not
+/// worth coupling a generic cross-category store to five other features' id spaces). A `null`
+/// `ownerId` is the two-step-upload case (`../implementation-plan.md`'s Phase 3 problem #2) — the
+/// owning entity didn't exist yet when the file was picked; a follow-up `PATCH /documents/:id`
+/// attaches it once it does.
+model Document {
+  id         String           @id @default(uuid())
+  tenantId   String
+  category   DocumentCategory
+  ownerId    String?
+  ownerLabel String?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  versions DocumentVersion[]
+
+  @@index([tenantId])
+  @@index([category])
+  @@index([ownerId])
+  @@map("documents")
+}
+
+/// One row per uploaded version (`GET /documents/:id/versions`). Phase 3 only ever writes version
+/// 1 (`POST /documents/upload` always creates a new `Document`); a real "upload a new version of
+/// this existing document" action is Phase 7.1's — this table already supports it without a schema
+/// change. `storageKey` is the S3/MinIO object key, never returned to a client directly — every
+/// read goes through `StorageService`'s presigned-URL generation (`documents.service.ts`).
+model DocumentVersion {
+  id               String   @id @default(uuid())
+  tenantId         String
+  documentId       String
+  version          Int
+  fileName         String
+  mimeType         String
+  sizeBytes        Int
+  storageKey       String
+  /// Plain id, no Prisma relation — same `actorUserId` pattern `AuditLog` already uses, so a
+  /// document version outlives a deleted `User` and still has `uploadedByLabel` (a denormalized
+  /// display name/email snapshot) to say who it was.
+  uploadedByUserId String?
+  uploadedByLabel  String
+  createdAt        DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, version])
+  @@index([tenantId])
+  @@map("document_versions")
 }
 
 // ---------------------------------------------------------------------------
