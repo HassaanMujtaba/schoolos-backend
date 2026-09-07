@@ -387,7 +387,9 @@ Pairs with **frontend Phase 3 (done)** — `modules/students.md`, `modules/paren
 its own dedicated frontend screens are Phase 7+** — `documents/`'s upload primitive.
 
 **Entities:** `Student`, `Parent`, `Guardian`, `Teacher`, `Enrollment`, `AdmissionInquiry`,
-`AdmissionApplication`, `Document`.
+`AdmissionApplication` (carries `admissionFeeInvoiceId String?` — a plain id column, not a Prisma
+relation, since `Invoice` doesn't exist until Phase 6; see the resolved ordering decision below),
+`Document`.
 
 **Endpoints:**
 
@@ -396,7 +398,14 @@ CRUD  /students
 CRUD  /parents            (+ child-linking)
 CRUD  /teachers
 CRUD  /admissions         + stage-transition actions: submit, review, schedule-test, interview,
-                          accept/reject, enroll (each flips AdmissionApplication.stage server-side)
+                          accept/reject, mark-fee-payment (Fee Payment stage entry — Phase 3 ships
+                          this as the existing manual "confirm payment received" placeholder;
+                          Phase 6 upgrades its implementation to real invoice generation without
+                          changing this contract, see below), enroll (each flips
+                          AdmissionApplication.stage server-side; enroll is server-side gated on
+                          the fee-payment stage being confirmed first, matching PRD §7's pipeline
+                          order — the stepper's stage order is an enforced state machine, not just
+                          a UI suggestion)
 POST  /documents/upload    signed-URL or direct upload, virus/malware scan, returns { id, url, ... }
 GET   /documents           ?category=&ownerId= — retrieval
 GET   /documents/:id/versions
@@ -406,13 +415,42 @@ GET   /documents/:id/versions
 independently by two different frontend module docs, which is a signal to fix them here rather than
 push the paper further downstream):
 
-1. **Admissions' Fee Payment stage runs _before_ Enrollment creates the `Student` record, but an
-   `Invoice` requires a student id.** `modules/admissions.md` and `modules/fees.md` both flag this
-   as unresolved. Pick one: (a) allow a fee structure/invoice to reference an
-   `AdmissionApplication` id instead of a `Student` id and reconcile on enrollment, or (b) reorder
-   the workflow so enrollment happens before fee collection and adjust the frontend stepper. This
-   is a product/data-model decision, not a coding task — resolve it before building `/admissions`'s
-   stage-transition endpoints.
+1. **RESOLVED — admissions↔fees ordering.** Admissions' Fee Payment stage runs _before_ Enrollment
+   creates the `Student` record, but `fees.md`'s `Invoice.studentId` is required — `modules/
+admissions.md` and `modules/fees.md` both flagged this as unresolved. **Decision: option (a),
+   not (b).** Keep the PRD §7 stage order and the already-built frontend stepper exactly as they
+   are (Fee Payment → Enrollment) — reordering it (option b) would mean creating a `Student` record
+   for every applicant who reaches Acceptance whether or not they ever pay the admission fee, which
+   is worse data hygiene than a nullable FK, contradicts the PRD's explicit pipeline, and would
+   force real frontend rework (stepper order, its tests) for a problem that's actually
+   backend-model-shaped. It also matches how this actually works at a real school: the admission
+   fee is what confirms the seat, paid _before_ the school commits to enrolling the student — the
+   data model should represent that order, not the reverse.
+
+   Concretely:
+   - **Phase 6** (when `Invoice` is built): `Invoice.studentId` becomes nullable, plus a new
+     `Invoice.admissionApplicationId` (also nullable) — a DB `CHECK` constraint enforces exactly
+     one of the two is set on any row, never both, never neither. Fee/outstanding-balance queries
+     that currently assume every invoice has a `studentId` need a fallback (show the applicant's
+     name off the linked `AdmissionApplication` instead) — flag this explicitly when Phase 6 is
+     scoped, it's a real query change, not a schema footnote.
+   - Admissions' `mark-fee-payment` stage transition (Phase 6's implementation of it) generates the
+     real `Invoice` against the tenant's "Admission" `FeeStructure`, with `admissionApplicationId`
+     set and `studentId: null`, and stamps the id onto `AdmissionApplication.admissionFeeInvoiceId`.
+     Payment recording (`POST /fees/invoices/:id/payments`) needs nothing new — it already only
+     needs the invoice id.
+   - `POST /admissions/:id/enroll` is gated server-side on that invoice's status being `paid`
+     (PRD §7's order enforced as a real business rule, not just client stepper sequencing), then
+     creates the `Student` row and **reconciles**: every `Invoice` with this
+     `admissionApplicationId` gets `studentId` set to the new student's id (keeping
+     `admissionApplicationId` too, as the historical link — never overwritten, never cleared).
+   - **Phase 3 (now)** ships the state-machine shape (the `mark-fee-payment` stage, the
+     `admissionFeeInvoiceId` column, `enroll`'s stage-gate) without the real invoice underneath —
+     `mark-fee-payment` stays the existing manual "confirm payment received" placeholder
+     `admissions.md` already describes, `admissionFeeInvoiceId` stays `null` until Phase 6 fills it
+     in. This is a genuinely additive Phase 6 change, not a rework, because the shape was decided
+     now instead of guessed at twice from two different module docs.
+
 2. **`FileUploadField` consumers (Admissions' documents panel, Students' documents tab) stage files
    before the owning entity exists**, so there's no `ownerId` yet at upload time. Support a
    two-step flow: upload returns a document id with `ownerId: null`, then a follow-up
@@ -508,7 +546,10 @@ Pairs with **frontend Phase 6 (done) — closes the PRD §65 MVP on the frontend
 **Modules:** `fees/`, `accounting/` (minimal — chart of accounts/expenses, not the full PRD §19
 scope yet), `search/`.
 
-**Entities:** `FeeStructure`, `Invoice`, `Payment`, `Refund`, `Discount`/`Scholarship`.
+**Entities:** `FeeStructure`, `Invoice` (`studentId` nullable + a new `admissionApplicationId`
+nullable, DB `CHECK` enforcing exactly one is set — see Phase 3's resolved admissions↔fees ordering
+decision; this is the concrete schema change that decision commits Phase 6 to), `Payment`,
+`Refund`, `Discount`/`Scholarship`.
 
 **Endpoints:**
 
@@ -518,7 +559,9 @@ POST /fees/invoices                 single student or bulk-by-class
 POST /fees/invoices/:id/payments
 POST /fees/payments/:id/refund
 GET  /fees/payments/:id/receipt
-GET  /fees/outstanding
+GET  /fees/outstanding              must handle admission-linked invoices with studentId: null —
+                                     group/display by the linked AdmissionApplication's applicant
+                                     name instead of a student record that may not exist yet
 GET  /search?q=&type=                cross-entity (students, invoices, staff, ...) — Postgres
                                      full-text (`tsvector` + GIN index) per PRD §42
 ```
