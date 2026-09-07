@@ -36,4 +36,11 @@ export const TENANT_SCOPED_MODELS = new Set<string>([
   'AdmissionApplication',
   'Document',
   'DocumentVersion',
+  // Phase 4 — Academics (see ../../../implementation-plan.md)
+  'TimetableEntry',
+  'Substitution',
+  'AttendanceRecord',
+  'LeaveRequest',
+  'Homework',
+  'HomeworkSubmission',
 ]);

@@ -90,15 +90,25 @@ const PERMISSIONS: string[] = [
   'subjects.create',
   'subjects.update',
   'subjects.delete',
+  // Phase 4 (Academics) — corrected the same way Phase 2/3's rows were: `timetable.manage`/
+  // `timetable.generate` and `homework.manage` below were this catalog's original draft, but the
+  // actually-built frontend (`TimetableGridPage.tsx`/`SubstitutionsTable.tsx`'s single
+  // `usePermission('timetable.update')` gate for all editing/generation/substitution actions;
+  // `HomeworkList.tsx`/`HomeworkListPage.tsx`'s granular `usePermission('homework.create'/
+  // 'homework.update'/'homework.delete')`) calls different strings — see
+  // ../implementation-plan.md's Phase 4 section. `homework.grade` is kept (PRD §4's own catalog
+  // entry) even though nothing client-side gates the grading form on it yet — server-side
+  // enforcement doesn't depend on the frontend checking it first.
   'timetable.read',
-  'timetable.manage',
-  'timetable.generate',
+  'timetable.update',
   'attendance.read',
   'attendance.mark',
   'attendance.modify',
   'attendance.export',
   'homework.read',
-  'homework.manage',
+  'homework.create',
+  'homework.update',
+  'homework.delete',
   'homework.grade',
   'exams.read',
   'exams.manage',

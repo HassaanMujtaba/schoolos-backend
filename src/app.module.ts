@@ -20,6 +20,9 @@ import { StudentsModule } from './students/students.module';
 import { ParentsModule } from './parents/parents.module';
 import { TeachersModule } from './teachers/teachers.module';
 import { AdmissionsModule } from './admissions/admissions.module';
+import { TimetableModule } from './timetable/timetable.module';
+import { AttendanceModule } from './attendance/attendance.module';
+import { HomeworkModule } from './homework/homework.module';
 
 @Module({
   imports: [
@@ -45,7 +48,11 @@ import { AdmissionsModule } from './admissions/admissions.module';
     ParentsModule,
     TeachersModule,
     AdmissionsModule,
-    // Phase 4+ feature modules mount here, in the order listed in
+    // Phase 4 — Academics.
+    TimetableModule,
+    AttendanceModule,
+    HomeworkModule,
+    // Phase 5+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [

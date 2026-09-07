@@ -35,19 +35,22 @@ model Tenant {
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
-  branches      Branch[]
-  users         User[]
-  auditLogs     AuditLog[]
-  school        School?
-  academicYears AcademicYear[]
-  classes       SchoolClass[]
-  sections      Section[]
-  subjects      Subject[]
-  parents       Parent[]
-  students      Student[]
-  teachers      Teacher[]
-  admissions    AdmissionApplication[]
-  documents     Document[]
+  branches         Branch[]
+  users            User[]
+  auditLogs        AuditLog[]
+  school           School?
+  academicYears    AcademicYear[]
+  classes          SchoolClass[]
+  sections         Section[]
+  subjects         Subject[]
+  parents          Parent[]
+  students         Student[]
+  teachers         Teacher[]
+  admissions       AdmissionApplication[]
+  documents        Document[]
+  timetableEntries TimetableEntry[]
+  substitutions    Substitution[]
+  homework         Homework[]
 
   @@map("tenants")
 }
@@ -476,6 +479,12 @@ model Student {
   academicYearId    String
   status            StudentStatus @default(active)
   medicalInfo       String        @default("")
+  /// Links this profile to the portal login it belongs to — the same `Parent.userId` idiom
+  /// (`../../implementation-plan.md`'s Phase 4 "`me` idiom" convention: `studentId=me` on
+  /// attendance/homework resolves via this column). Nullable and unset by anything through Phase
+  /// 4 — same documented gap as `Parent.userId`, no student-portal-invite flow exists yet, so
+  /// every `studentId=me` call 404s until one does; this needs no change once it exists.
+  userId            String?       @unique
   /// `EmergencyContact[]` (`{ name, relation, phone }`) — a JSON column, not a child table: never
   /// queried/filtered on individually, always read/written as one whole list per
   /// `emergencyContactSchema`'s `useFieldArray` shape, the same call `School`'s free-text fields
@@ -484,12 +493,15 @@ model Student {
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
-  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  schoolClass  SchoolClass         @relation(fields: [classId], references: [id])
-  section      Section             @relation(fields: [sectionId], references: [id])
-  academicYear AcademicYear        @relation(fields: [academicYearId], references: [id])
-  enrollments  Enrollment[]
-  familyLinks  ParentStudentLink[]
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolClass         SchoolClass          @relation(fields: [classId], references: [id])
+  section             Section              @relation(fields: [sectionId], references: [id])
+  academicYear        AcademicYear         @relation(fields: [academicYearId], references: [id])
+  enrollments         Enrollment[]
+  familyLinks         ParentStudentLink[]
+  attendanceRecords   AttendanceRecord[]
+  leaveRequests       LeaveRequest[]
+  homeworkSubmissions HomeworkSubmission[]
 
   @@unique([tenantId, admissionNumber])
   @@index([tenantId])
@@ -534,6 +546,10 @@ model Teacher {
   /// emergencyContacts`.
   qualifications  Json     @default("[]")
   subjectIds      String[]
+  /// Links this profile to the portal login it belongs to — same `Parent.userId`/`Student.userId`
+  /// idiom (`teacherId=me` on `GET /timetable`). Same documented gap: nullable, unset by anything
+  /// through Phase 4, 404s until a teacher-portal-invite flow provisions it.
+  userId          String?  @unique
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -696,6 +712,215 @@ model DocumentVersion {
   @@unique([documentId, version])
   @@index([tenantId])
   @@map("document_versions")
+}
+
+// ---------------------------------------------------------------------------
+// Academics (PRD §12/§13/§14/§15, Phase 4) —
+// `frontend/modules/timetable.md` / `attendance.md` / `homework.md` "Backend dependencies" is the
+// source contract. One correction against the real frontend source, same discipline as every
+// earlier phase's own correction note — see `../implementation-plan.md`'s "Phase 4 correction":
+// the permission catalog's `timetable.manage`/`timetable.generate` and `homework.manage` buckets
+// are replaced below by the granular strings the actually-built frontend calls (`timetable.update`
+// for all of timetable's editing/generation/substitution actions;
+// `homework.create`/`.update`/`.delete` for homework's CRUD, `homework.grade` kept for grading).
+//
+// No separate `Timetable` header entity (`../implementation-plan.md`'s original Phase 4 entity
+// list had one) — `frontend/src/features/timetable/api.ts`'s `TimetableEntry` is the only shape
+// ever fetched or written, same "no separate aggregate entity" correction as Phase 3's
+// `AdmissionInquiry`.
+// ---------------------------------------------------------------------------
+
+/// §12 Timetable Management — one flat table of scheduled periods. `roomId` stays free text, same
+/// as `Section.roomLabel` — no Room entity yet (`school-setup.md`'s own open question, unchanged
+/// by this phase). `classId`/`sectionId`/`subjectId`/`teacherId` are plain ids, not Prisma
+/// relations — same "peer entity, no ownership hierarchy" trade-off as `TeacherAssignment`'s own
+/// fields, validated at the application layer (`timetable.service.ts`) instead of by a DB foreign
+/// key.
+model TimetableEntry {
+  id          String   @id @default(uuid())
+  tenantId    String
+  classId     String
+  sectionId   String
+  subjectId   String
+  teacherId   String
+  roomId      String   @default("")
+  /// 0 = Monday, per `frontend/src/features/timetable/constants.ts`'s `WEEKDAYS` — matches the
+  /// frontend's own convention exactly, not ISO-8601's 1 = Monday. Assumes a Monday–Saturday
+  /// six-day week (0-5), unconfirmed with product — see `timetable.md`'s own "Open questions".
+  dayOfWeek   Int
+  periodIndex Int
+  startTime   String
+  endTime     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([classId, sectionId])
+  @@index([teacherId])
+  @@map("timetable_entries")
+}
+
+/// A manual, per-date override of who teaches a class's period — not a recurring
+/// `TimetableEntry`. `originalTeacherId`/`subjectId`/`classId`/`sectionId`/`periodIndex` are
+/// resolved from `SubstitutionForm`'s chosen `TimetableEntry` at submit time and sent flattened
+/// (`frontend/src/features/timetable/schemas.ts`'s own comment on `substitutionSchema`), not
+/// stored here as a pointer back to it.
+model Substitution {
+  id                  String   @id @default(uuid())
+  tenantId            String
+  date                DateTime @db.Date
+  classId             String
+  sectionId           String
+  periodIndex         Int
+  subjectId           String
+  originalTeacherId   String
+  substituteTeacherId String
+  reason              String   @default("")
+  createdAt           DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([date])
+  @@map("substitutions")
+}
+
+// §13's own six statuses — matches `ATTENDANCE_STATUSES` in `attendance/schemas.ts` verbatim.
+enum AttendanceStatus {
+  present
+  absent
+  late
+  excused
+  half_day
+  leave
+}
+
+/// §13 Student Attendance — one row per student per day. `@@unique([studentId, date])` has no
+/// `tenantId` in the compound key, same reasoning as `ParentStudentLink`'s own
+/// `@@unique([parentId, studentId])`: `studentId` is already a globally-unique uuid, so no two
+/// tenants can ever collide on this pair — keeping `tenantId` out of the compound key avoids
+/// PrismaService's tenant-scoping extension needing to know about a tenant-inclusive compound
+/// selector. This is also exactly the upsert key `POST /attendance/bulk` needs: marking an
+/// already-marked day again corrects it in place, matching `attendance.md`'s "pre-fills the
+/// marking UI if already partially marked". `markedByUserId`/`markedByLabel` are a denormalized
+/// actor snapshot, same pattern as `DocumentVersion.uploadedByUserId`/`.uploadedByLabel`.
+model AttendanceRecord {
+  id             String           @id @default(uuid())
+  tenantId       String
+  studentId      String
+  classId        String
+  sectionId      String
+  date           DateTime         @db.Date
+  status         AttendanceStatus
+  markedByUserId String?
+  markedByLabel  String           @default("")
+  markedAt       DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, date])
+  @@index([tenantId])
+  @@index([classId, sectionId, date])
+  @@map("attendance_records")
+}
+
+enum LeaveStatus {
+  pending
+  approved
+  rejected
+}
+
+/// §14 Student Leave — Parent submits → Teacher/Admin review (this module owns the review queue
+/// and the record itself; the parent-side submission form renders inside the portal shell, per
+/// `attendance.md`'s own "Requirements" section). `startDate`/`endDate` back the frontend's
+/// `dateRange: { from, to }` — the API response composes the two into that shape, same "form shape
+/// != wire shape" pattern `Enrollment`/`Substitution` above already use.
+model LeaveRequest {
+  id                String      @id @default(uuid())
+  tenantId          String
+  studentId         String
+  startDate         DateTime    @db.Date
+  endDate           DateTime    @db.Date
+  reason            String
+  status            LeaveStatus @default(pending)
+  submittedByUserId String?
+  submittedByLabel  String      @default("")
+  reviewedByUserId  String?
+  reviewedByLabel   String?
+  reviewNotes       String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([studentId])
+  @@index([status])
+  @@map("leave_requests")
+}
+
+/// §15 Homework & Assignment Management. `attachments` is `HomeworkAttachment[]` JSON, same
+/// trade-off as `Student.emergencyContacts` — never queried individually — and stays an
+/// always-empty placeholder for now: `homeworkSchema` (the frontend's own create/edit payload) has
+/// no attachments field yet, matching `homework.md`'s own "Open questions" note that file upload
+/// isn't wired here even though the shared `documents/` primitive exists. `teacherId` is stamped
+/// server-side from the authenticated session at create time, never client-supplied.
+model Homework {
+  id          String   @id @default(uuid())
+  tenantId    String
+  title       String
+  description String   @default("")
+  attachments Json     @default("[]")
+  links       String[] @default([])
+  deadline    DateTime
+  classIds    String[]
+  sectionIds  String[]
+  teacherId   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  submissions HomeworkSubmission[]
+
+  @@index([tenantId])
+  @@map("homework")
+}
+
+enum SubmissionStatus {
+  submitted
+  graded
+}
+
+/// One row per student per homework, created only on actual submit — "not submitted" is the
+/// absence of a row for that `(homeworkId, studentId)` pair, resolved at read time
+/// (`homework.service.ts`), not a stored status. `files` is JSON, same placeholder-until-wired
+/// reasoning as `Homework.attachments` above (`submissionSchema` has no file field yet either).
+model HomeworkSubmission {
+  id             String           @id @default(uuid())
+  tenantId       String
+  homeworkId     String
+  studentId      String
+  files          Json             @default("[]")
+  textResponse   String           @default("")
+  submittedAt    DateTime         @default(now())
+  status         SubmissionStatus @default(submitted)
+  grade          String?
+  feedback       String?
+  gradedAt       DateTime?
+  gradedByUserId String?
+  gradedByLabel  String?
+
+  homework Homework @relation(fields: [homeworkId], references: [id], onDelete: Cascade)
+  student  Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([homeworkId, studentId])
+  @@index([tenantId])
+  @@index([homeworkId])
+  @@index([studentId])
+  @@map("homework_submissions")
 }
 
 // ---------------------------------------------------------------------------

@@ -98,9 +98,9 @@ academic-years.read / academic-years.create / academic-years.update / academic-y
 classes.read / classes.create / classes.update / classes.delete
 sections.read / sections.create / sections.update / sections.delete
 subjects.read / subjects.create / subjects.update / subjects.delete
-timetable.read / timetable.manage / timetable.generate
+timetable.read / timetable.update
 attendance.read / attendance.mark / attendance.modify / attendance.export
-homework.read / homework.manage / homework.grade
+homework.read / homework.create / homework.update / homework.delete / homework.grade
 exams.read / exams.manage / marks.enter / results.publish
 fees.read / fees.create / fees.collect / fees.refund / fees.delete
 library.read / library.manage-catalog / library.circulate
@@ -140,6 +140,16 @@ own permission, distinct from `admissions.update`, because the frontend's `Revie
 `DecisionPanel` gate the "approve for entrance test" / "accept" / "waitlist" / "reject" actions
 separately from the general edit actions every other stage panel gates on `admissions.update`.
 `prisma/seed.ts` now seeds the granular strings.
+
+**Phase 4 correction (same pattern):** the timetable/homework rows above were originally drafted
+as `timetable.manage`/`timetable.generate` and `homework.manage` buckets; the actually-built
+frontend (`TimetableGridPage.tsx`/`SubstitutionsTable.tsx`'s single `usePermission('timetable.
+update')` gate covering every editing/generation/substitution action; `HomeworkList.tsx`/
+`HomeworkListPage.tsx`'s granular `usePermission('homework.create'/'homework.update'/
+'homework.delete')`) calls different strings. `homework.grade` is kept from the original catalog
+even though nothing client-side gates the grading form on it yet — server-side enforcement
+(`PATCH /homework/submissions/:id`) doesn't depend on the frontend checking it first.
+`prisma/seed.ts` now seeds the corrected strings.
 
 ## Folder structure
 
@@ -555,47 +565,107 @@ are reachable together — every contract question this phase had is resolved ab
 
 ---
 
-### Phase 4 — Academics
+### Phase 4 — Academics ✅ built, backend side confirmed
 
 Pairs with **frontend Phase 4 (done)** — `modules/timetable.md`, `modules/attendance.md`,
 `modules/homework.md`.
 
-**Modules:** `timetable/`, `attendance/`, `homework/`.
+**Status:** `timetable/`, `attendance/` (+ its `leave/student` controller), and `homework/` all
+built, migration `20260907165715_phase4_academics` applied, unit- and e2e-tested against a live
+Postgres/Redis (Docker's Postgres container plus a locally-reachable Redis this pass, MinIO not
+reachable in this environment — same pre-existing gap Phase 3 documented, and irrelevant here since
+nothing in this phase touches object storage: homework/submission attachments stay unwired JSON
+placeholders, see below). `test/academics.e2e-spec.ts` (38 tests: full CRUD + permission gating +
+tenant isolation for all three modules, the bulk-attendance upsert-in-place behavior, the
+analytics/export endpoints, the leave-request ownership check, and the `'me'` idiom's
+documented-gap 404 _and_ its resolved-once-linked success path for both `Teacher.userId` and
+`Student.userId`). `npm run verify` and the full e2e suite are green except the four pre-existing
+MinIO-dependent Documents tests (Phase 3's own documented gap, unrelated to this phase).
 
-**Entities:** `Timetable`, `TimetableEntry`, `Substitution`, `Attendance`, `Homework`,
-`HomeworkSubmission`, `LeaveRequest` (student leave, PRD §14).
+**Permission catalog correction:** see the "Phase 4 correction" note earlier in this doc — the
+granular strings the built frontend actually calls (`timetable.update` for every timetable
+mutation; `homework.create`/`.update`/`.delete` for homework's CRUD) replace the original
+`timetable.manage`/`.generate` and `homework.manage` placeholders, seeded and wired into every
+controller's `@RequirePermission`.
 
-**Endpoints:**
+**The `'me'` idiom, standardized this phase** (attendance, homework, and timetable's own
+`teacherId=me`; Phase 7+ modules reusing it — HR & Payroll's `employeeId=me`, Library's portal
+`studentId=me` — should call the same helpers rather than reinventing it): implemented once in
+`common/identity/resolve-me.ts`, resolving from a new `Student.userId`/`Teacher.userId` (nullable,
+unique — same shape as `Parent.userId`). Same documented gap as `Parent.userId`: nothing provisions
+either column yet (no student/teacher portal-invite flow exists), so every real caller gets a 404
+today — `academics.e2e-spec.ts` proves both states, the 404 and (by writing the link directly, the
+way a future invite flow would) the resolved success path, so this needs no further change once
+that flow exists.
+
+**Two schema corrections against the real frontend source, same discipline as every earlier
+phase's own correction notes:**
+
+- **No separate `Timetable` header entity.** The original entity list above had one;
+  `frontend/src/features/timetable/api.ts`'s `TimetableEntry` is the only shape ever fetched or
+  written — same "no separate aggregate entity" correction as Phase 3's `AdmissionInquiry`.
+- **`Attendance` is `AttendanceRecord`** — matches the frontend's own type name
+  (`attendance/api.ts`'s `AttendanceRecord`), not a schema difference, just a naming correction
+  against the real contract.
+
+**Endpoints (as actually built):**
 
 ```
-GET   /timetable/entries          ?classId=&teacherId=&roomId=
-CRUD  /timetable/entries
-POST  /timetable/generate          queued job — constraint solving server-side; the frontend only
-                                   triggers a run and polls/reviews the result, never solves a
-                                   schedule client-side
-CRUD  /timetable/substitutions     date-scoped
-GET   /attendance                  + a studentId param for the portal ('me' idiom, see below)
-POST  /attendance/bulk
-GET   /homework                    + a studentId param for the portal
-POST  /homework/:id/submissions
-GET   /teachers/me/dashboard       aggregation: today's classes, pending tasks (or split into
-                                   composed calls — see teachers.md's own still-open question;
-                                   decide once this phase's real data volumes are known)
+GET    /timetable                 ?classId=&sectionId= | ?teacherId= (accepts 'me') | ?roomId=
+GET    /timetable/entries         full unfiltered collection, for client-side conflict checking
+CRUD   /timetable/entries
+POST   /timetable/generate        NOT a real constraint solver — a documented, honestly-flagged
+                                  round-robin filler over each subject's TeacherAssignment,
+                                  avoiding teacher double-booking only; replaces every entry for
+                                  the target class/section, synchronous (not a queued job, matching
+                                  the frontend's own assumed synchronous response shape)
+CRUD   /timetable/substitutions   date-scoped
+GET    /attendance                ?classId=&sectionId=&date= | ?studentId= (accepts 'me') +
+                                  optional from/to
+POST   /attendance/bulk           upserts on [studentId, date] — resubmitting a day corrects it
+PATCH  /attendance/:id            attendance.modify
+GET    /attendance/analytics      ?scope=daily|weekly|monthly|term&groupBy=student|class|
+                                  teacher|branch — 'teacher' groups by the marking teacher
+                                  (markedByUserId), 'branch' is one tenant-wide row (see the real,
+                                  flagged gap below)
+GET    /attendance/export         same params as analytics, CSV
+POST   /leave/student             no @RequirePermission — ownership enforced in the service instead
+                                  (staff permission, or the caller's own linked child)
+GET    /leave/student             ?studentId= (accepts 'me') → plain array; otherwise
+                                  ?page=&pageSize=&status= → paged review queue
+PATCH  /leave/student/:id         attendance.modify (no dedicated leave-review permission exists,
+                                  per this module's own resolved decision)
+CRUD   /homework                  teacherId stamped server-side from the session, never client-
+                                  supplied; list always includes submissionCount/studentCount
+                                  (not just when studentId-scoped — needed for the teacher's own
+                                  "18/25 submitted" progress column)
+POST   /homework/:id/submissions  student's own submission only, resolved via the 'me' idiom
+GET    /homework/:id/submissions  ?studentId= (accepts 'me') → one submission or null; otherwise →
+                                  every submission (teacher grading queue)
+PATCH  /homework/submissions/:id  homework.grade
 ```
 
-**The `me` idiom, used across four different modules' assumed contracts** (attendance, homework,
-teachers dashboard, and later leave/payroll) — standardize it once here: any endpoint accepting a
-`studentId`/`teacherId`/`employeeId` query param also accepts the literal string `"me"`, resolved
-server-side from the authenticated session to that user's own linked record. Document this as a
-platform-wide convention (not a per-module special case) so Phase 7+ modules that reuse it
-(HR & Payroll's `employeeId=me`, Library's portal `studentId=me`) don't each reinvent it slightly
-differently.
+**Not built this phase, deliberately deferred:** `GET /teachers/me/dashboard` —
+`teachers.md`'s own still-open question about aggregation-vs-composed-calls stays open; nothing in
+this phase's own contract needed it, and deciding it without real data volumes would be a guess.
+Realtime attendance-change notifications (Socket.IO `attendance.updated`) also stay deferred, per
+the frontend's own phase-ordering call — the `/ws` gateway lands in Phase 7.7 once communication
+work needs it.
 
-**Integration task:** confirm the `studentId`/`teacherId=me` param on `GET /attendance` and
-`GET /homework` (both explicitly flagged as assumed extensions in the frontend plan's Phase 4
-section). Realtime attendance-change notifications (Socket.IO `attendance.updated`) stay deferred
-on both sides, per the frontend's own phase-ordering call — build the `/ws` gateway itself once
-Phase 6/7 communication work needs it, not speculatively here.
+**A real, flagged data-model gap found building attendance analytics, not silently
+worked around:** `groupBy=branch` has no real data path — `Student`/`SchoolClass`/`Section` carry
+no `branchId` anywhere in this schema (branches exist only at the school-setup level, PRD §6,
+never linked to academic structure). Rather than fabricating a multi-branch split that isn't there,
+this groups every record into one tenant-wide `"All branches"` row — flagged here the same way
+`Section.classTeacherName` staying free text was flagged in Phase 2, not fixed silently. Linking
+`Student`/`SchoolClass` to a real `Branch` is a schema change for whichever phase first needs
+genuine per-branch attendance reporting.
+
+**Integration task:** run `frontend`'s existing timetable/attendance/homework component and hook
+tests against this real backend locally (not just their own mocks) — every contract question this
+phase had (the `'me'` idiom's shape, the permission strings, the six-day-week assumption baked
+into `generate()`) is resolved above, so, like Phases 2 and 3, what's left is verification, not
+design.
 
 ---
 
@@ -997,7 +1067,7 @@ side?"
 | 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                               | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                             |
 | 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                    | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                   |
 | 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time) | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending |
-| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                    | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending       |
 | 5     | Examinations                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
 | 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                                                  | ⏳ blocked on backend — **this is the real MVP integration milestone**                                                                   |
 | 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
