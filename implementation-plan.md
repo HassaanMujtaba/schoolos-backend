@@ -91,7 +91,12 @@ students.read / students.create / students.update / students.delete / students.e
 parents.read / parents.manage
 teachers.read / teachers.manage
 admissions.read / admissions.manage
-school-setup.manage (branches/academic years/classes/sections/subjects)
+school.read / school.update
+branches.read / branches.create / branches.update / branches.delete
+academic-years.read / academic-years.create / academic-years.update / academic-years.delete
+classes.read / classes.create / classes.update / classes.delete
+sections.read / sections.create / sections.update / sections.delete
+subjects.read / subjects.create / subjects.update / subjects.delete
 timetable.read / timetable.manage / timetable.generate
 attendance.read / attendance.mark / attendance.modify / attendance.export
 homework.read / homework.manage / homework.grade
@@ -116,6 +121,14 @@ ai.query / ai.generate-content / ai.view-analytics
 Confirm this list with frontend before final seed — it's assembled from ~20 module docs and is the
 single most load-bearing contract in the whole integration (every `RequirePermission` call on the
 frontend depends on the string matching exactly).
+
+**Phase 2 correction:** the school-setup row above was originally drafted as a single
+`school-setup.manage` bucket; the actually-built frontend (`router.tsx`, `navConfig.ts`, every
+`features/school-setup` form/table) calls `usePermission`/`RequirePermission` with the granular
+per-entity strings shown above instead. Checked against the real frontend source, not just the
+module doc, since the doc's own "Roles & permissions" section already had the granular list and the
+catalog above just hadn't been reconciled with it yet — `prisma/seed.ts` now seeds the granular
+strings.
 
 ## Folder structure
 
@@ -290,10 +303,57 @@ either; build the plain email/phone+password flow first.
 
 ---
 
-### Phase 2 — School Setup & Core Entities
+### Phase 2 — School Setup & Core Entities ✅ built, backend side confirmed
 
 Pairs with **frontend Phase 2 (done)** —
 [`frontend/modules/school-setup.md`](../frontend/modules/school-setup.md).
+
+**Status:** `tenants/` + `school-setup/` built (`src/tenants/branches/`,
+`src/school-setup/{schools,academic-years,classes,sections,subjects}/`), migration
+`20260906191241_phase2_school_setup` committed, unit-tested
+(`tenant-scoping.spec.ts`'s new flat-merge/nested-write coverage) and e2e-tested
+(`test/school-setup.e2e-spec.ts`: school-profile lazy-create + PATCH validation, branch
+create/list/search/get/update-replaces-children/delete, academic-year create with nested
+terms/holidays + computed `isCurrent` + inverted-date-range rejection, class→section→subject
+referential checks including cross-tenant-id rejection and cascade-delete, all with a
+read-only-role-gets-403 and wrong-tenant-gets-404 case per resource). `npm run verify` green
+(typecheck/lint/format/secretlint/unit); e2e unverified against a live stack in this
+environment (same Postgres/Redis-not-reachable-here reason as every other phase — run
+`test:e2e` once Docker is available, before starting Phase 3).
+
+**Nested-resource shape resolved:** buildings/departments and terms/holidays are **not**
+separate sub-resource endpoints — they're plain arrays nested in the parent's own
+create/update payload (`BranchDto.buildings`/`.departments`,
+`AcademicYearDto.terms`/`.holidays`), replaced wholesale (delete-then-recreate in one
+transaction) on every parent write. This matches the frontend's actual built shape
+(`BranchFormValues`/`AcademicYearFormValues`'s `useFieldArray`-submitted full lists), not a
+guess — `modules/school-setup.md`'s "flat vs. nested" open question is closed in favor of
+nested-array-in-payload. They're still real child tables underneath (`Building`, `Department`,
+`Term`, `Holiday` — see `schema.prisma`'s own doc comments), not JSON columns, so they stay
+queryable/indexed like everything else.
+
+**A real bug found and fixed along the way, not just this phase's own code:** the tenant-scoping
+Prisma extension (`tenant-scoping.ts`) AND-wrapped every operation's `where`, including
+`findUnique`/`update`/`upsert`/`delete` — but those take a `WhereUniqueInput`, which Prisma
+requires a top-level unique selector for, and AND-wrapping strips that level away
+(`PrismaClientValidationError`). Phase 0/1 never exercised this path (no `findUnique`/`update`/
+`delete` on a tenant-scoped model yet); Phase 2's branch/class/section/subject CRUD is the first
+to call it. Fixed by flat-merging `tenantId` into the where for those five operations instead of
+AND-wrapping, same never-trust-a-client-supplied-`tenantId` guarantee, different merge shape —
+see `tenant-scoping.ts`'s own doc comment and the new tests in `tenant-scoping.spec.ts`.
+
+**A related limit documented, not a bug:** the same extension only sees a call's top-level
+`model`/`operation` — it has no visibility into a nested `data.buildings: { create: [...] }`
+write, so `Building`/`Department`/`Term`/`Holiday` rows created through a parent's nested payload
+get no `tenantId` from the extension at all (their `tenantId` column is required, so this fails
+loudly rather than silently, but every service with a tenant-scoped nested write has to stamp
+`tenantId` in by hand — see `BranchesService.create`'s own doc comment, and
+`tenant-scoping.spec.ts`'s "does NOT reach into a nested relation create" test documenting the
+limit directly).
+
+**Permission catalog correction:** see the "Phase 2 correction" note earlier in this doc — the
+granular per-entity strings (`branches.read`, `academic-years.create`, etc.) replace the original
+`school-setup.manage` placeholder, seeded and wired into every controller's `@RequirePermission`.
 
 **Module:** `tenants/` (branches), `school-setup/` (academic years, classes, sections, subjects).
 
@@ -311,12 +371,10 @@ CRUD       /sections
 CRUD       /subjects
 ```
 
-**Integration task:** confirm the nested-resource shape frontend assumed (buildings/departments as
-sub-resources of `/branches/:id`, terms/holidays as sub-resources of `/academic-years/:id`) versus
-flat top-level collections — `modules/school-setup.md`'s own open question. Pick one and update
-whichever side assumed wrong; this phase establishes the **list → create/edit form → detail view**
-pattern every later phase reuses on both sides (`EntityForm`/`EntityDetail` on frontend), so getting
-the nesting convention right here saves re-litigating it 15 more times.
+**Integration task:** run `frontend`'s existing school-setup component/hook tests against this real
+backend locally (not just its own mocks) once Postgres/Redis are reachable — the nested-resource
+shape question itself is resolved above, so this phase's remaining integration step is verification,
+not a design decision.
 
 ---
 
@@ -804,7 +862,7 @@ side?"
 | ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note) | — (no frontend-facing surface)                                                                               |
 | 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed |
-| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env     | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB       |
 | 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend; admissions↔fees ordering decision needed first                                        |
 | 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |
 | 5     | Examinations                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                   | ⏳ blocked on backend                                                                                        |

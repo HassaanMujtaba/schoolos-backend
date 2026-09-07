@@ -1,4 +1,5 @@
-// SchoolOS backend — Prisma schema, Phase 0 (Foundation) entities only.
+// SchoolOS backend — Prisma schema.
+// Phase 0 (Foundation) + Phase 1 (Auth) + Phase 2 (School Setup & Core Entities).
 // See ../implementation-plan.md for what each later phase adds. PRD §45 is the full entity list
 // this schema grows toward; PRD §3 governs the tenant/branch shape every later model follows.
 
@@ -34,30 +35,72 @@ model Tenant {
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
-  branches  Branch[]
-  users     User[]
-  auditLogs AuditLog[]
+  branches      Branch[]
+  users         User[]
+  auditLogs     AuditLog[]
+  school        School?
+  academicYears AcademicYear[]
+  classes       SchoolClass[]
+  sections      Section[]
+  subjects      Subject[]
 
   @@map("tenants")
 }
 
-/// PRD §6 Branch Management. Campus/Building/Department (also §6) are deferred to Phase 2's own
-/// migration, once `school-setup` is actually being built — Phase 0 only needs enough of the
-/// tenant/branch shape to prove isolation works.
+/// PRD §6 Branch Management. `campus`/`buildings`/`departments` land in Phase 2's own migration —
+/// `frontend/modules/school-setup.md`'s `BranchFormValues` sends buildings/departments as flat
+/// `{ name }[]` arrays nested in the branch payload, not their own top-level resources; `Building`/
+/// `Department` below are real child tables (so they're queryable/indexed like everything else)
+/// but the API surface (`school-setup/branches.controller.ts`) replaces the whole nested list on
+/// every branch write, matching that nested-array contract exactly rather than exposing separate
+/// CRUD endpoints for them.
 model Branch {
   id        String   @id @default(uuid())
   tenantId  String
   name      String
+  campus    String?
   address   String?
   isMain    Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  users  User[]
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users       User[]
+  buildings   Building[]
+  departments Department[]
 
   @@index([tenantId])
   @@map("branches")
+}
+
+/// Flat name-list item nested under a Branch — see `Branch`'s own doc comment. Carries its own
+/// `tenantId` (duplicated from `branch.tenantId`, same reasoning as `UserRole` above) so
+/// `PrismaService`'s tenant-scoping extension can scope it directly without a join.
+model Building {
+  id       String @id @default(uuid())
+  tenantId String
+  branchId String
+  name     String
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@map("buildings")
+}
+
+/// See `Building`'s own doc comment — same shape, same reasoning, one per branch/department pair.
+model Department {
+  id       String @id @default(uuid())
+  tenantId String
+  branchId String
+  name     String
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@map("departments")
 }
 
 // ---------------------------------------------------------------------------
@@ -97,8 +140,8 @@ model User {
 /// A fixed, seeded catalog (`prisma/seed.ts`) matching PRD §4's Platform/School role list — not
 /// a per-tenant custom-role builder. Revisit if a later phase needs tenant-defined roles.
 model Role {
-  id       String @id @default(uuid())
-  key      String @unique
+  id       String  @id @default(uuid())
+  key      String  @unique
   label    String
   isSystem Boolean @default(true)
 
@@ -148,6 +191,173 @@ model UserRole {
   @@unique([userId, roleId])
   @@index([tenantId])
   @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// School Setup & Core Entities (PRD §6, Phase 2) —
+// `frontend/modules/school-setup.md` "Data model / key fields" is the source contract for every
+// field below; keep the two in sync.
+// ---------------------------------------------------------------------------
+
+/// One row per tenant (§6 School Profile) — not itself a list, so there's no separate "school id"
+/// anywhere in the session; the frontend addresses it as `/schools/current`, resolved server-side
+/// from the authenticated tenant (see `school-setup.md`'s own "confirm with backend" note, resolved
+/// here: keep `/schools/current`, there is still nothing else in the session to address it by).
+/// Lazily created on first `GET/PATCH /schools/current` for a tenant that doesn't have one yet
+/// (`schools.service.ts`) — there is no tenant-provisioning flow before Phase 7.9's Platform
+/// Console, so a row can't be guaranteed to exist by the time this endpoint is first called.
+model School {
+  id                 String   @id @default(uuid())
+  tenantId           String   @unique
+  name               String
+  email              String   @default("")
+  phone              String   @default("")
+  website            String   @default("")
+  address            String   @default("")
+  registrationNumber String   @default("")
+  taxInfo            String   @default("")
+  /// A plain string, not a Prisma enum, deliberately: `frontend/src/features/school-setup/
+  /// schemas.ts`'s `SCHOOL_TYPES` includes hyphenated values (`"higher-secondary"`) that aren't
+  /// valid Prisma enum-member identifiers, and an enum's *client-facing* value is always its
+  /// member name, not a `@map`-ped alias — there is no way to make a Prisma enum round-trip that
+  /// exact string. Validated against `SCHOOL_TYPES` at the application layer instead
+  /// (`schools/dto/school.dto.ts`'s `@IsIn`), matching `SubjectType` below's contrasting choice
+  /// (no hyphens there, so a real enum works and does).
+  schoolType         String   @default("other")
+  timezone           String   @default("UTC")
+  currency           String   @default("USD")
+  language           String   @default("en")
+  logoUrl            String   @default("")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("schools")
+}
+
+/// §6 Academic Configuration. `terms`/`holidays` are nested arrays in the frontend's own payload
+/// shape (`AcademicYearFormValues`), backed here by real child tables for the same reason
+/// `Building`/`Department` are — see `Branch`'s doc comment, same pattern applies.
+model AcademicYear {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  // No stored `isCurrent` column: `AcademicYear` extends `AcademicYearFormValues` (which this
+  // model matches) plus a read-only `isCurrent` on the frontend's own `AcademicYear` API type
+  // (`features/school-setup/api.ts`), but nothing in the built frontend ever sends a value for it
+  // — `AcademicYearTable.tsx` only *displays* the badge, there's no "mark as current" action to
+  // wire a mutation endpoint to. `academic-years.service.ts` computes it instead
+  // (`startDate <= today <= endDate`), which is both simpler and more accurate than a manually
+  // toggled flag that nothing in the product actually toggles.
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  terms    Term[]
+  holidays Holiday[]
+
+  @@index([tenantId])
+  @@map("academic_years")
+}
+
+model Term {
+  id             String   @id @default(uuid())
+  tenantId       String
+  academicYearId String
+  name           String
+  startDate      DateTime @db.Date
+  endDate        DateTime @db.Date
+
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([academicYearId])
+  @@map("terms")
+}
+
+model Holiday {
+  id             String   @id @default(uuid())
+  tenantId       String
+  academicYearId String
+  name           String
+  date           DateTime @db.Date
+
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([academicYearId])
+  @@map("holidays")
+}
+
+/// §6 "Grades/classes" — named `SchoolClass` (not `Class`, a reserved word to avoid tangling with)
+/// per `../implementation-plan.md`'s own Phase 2 entity list.
+model SchoolClass {
+  id         String   @id @default(uuid())
+  tenantId   String
+  name       String
+  gradeLevel Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sections Section[]
+
+  @@index([tenantId])
+  @@map("classes")
+}
+
+/// `classTeacherName`/`roomLabel` are free text on purpose — no Teachers or Rooms entity exists
+/// yet (`school-setup.md`'s own open question), swap for real foreign keys once Phase 3 (Teachers)
+/// and a future Rooms entity land.
+model Section {
+  id               String   @id @default(uuid())
+  tenantId         String
+  classId          String
+  name             String
+  classTeacherName String   @default("")
+  roomLabel        String   @default("")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schoolClass SchoolClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([classId])
+  @@map("sections")
+}
+
+/// Lowercase member names on purpose — a Prisma enum's client-facing value is its member name
+/// verbatim, and `frontend/src/features/school-setup/schemas.ts`'s `SUBJECT_TYPES` is
+/// `['core', 'elective', 'optional']`. No hyphens here (unlike `School.schoolType` above), so a
+/// real enum can match the frontend's exact strings and still get Postgres-level enforcement.
+enum SubjectType {
+  core
+  elective
+  optional
+}
+
+/// `classIds` is a plain string array, not a relation table — matches `school-setup.md`'s own data
+/// model verbatim ("classIds (string array)"). Referential integrity against `SchoolClass` is
+/// enforced in `subjects.service.ts` at write time instead of by a DB foreign key, the trade-off
+/// that shape implies; revisit if a real many-to-many join table ever earns its keep.
+model Subject {
+  id        String      @id @default(uuid())
+  tenantId  String
+  code      String
+  name      String
+  type      SubjectType
+  classIds  String[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("subjects")
 }
 
 // ---------------------------------------------------------------------------

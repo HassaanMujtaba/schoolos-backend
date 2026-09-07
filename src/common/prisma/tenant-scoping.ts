@@ -17,6 +17,28 @@ const WHERE_OPERATIONS = new Set([
   'groupBy',
 ]);
 
+/**
+ * These five take a `WhereUniqueInput`, not a general `WhereInput` — Prisma requires at least one
+ * genuinely unique selector (e.g. `id`) present at the *top level* of that object. Wrapping it in
+ * `{ AND: [existingWhere, { tenantId }] }` (what every other operation below gets) strips that top
+ * level away and Prisma throws `PrismaClientValidationError: Argument \`where\` of type
+ * XWhereUniqueInput needs at least one of \`id\` arguments` — verified against a live Postgres
+ * client while building Phase 2 (the first phase to actually call `findUnique`/`update`/`delete`
+ * on a tenant-scoped model; Phase 0/1 never exercised this path, which is how it shipped
+ * unnoticed). Flat-merging `tenantId` alongside the unique selector instead
+ * (`{ ...existingWhere, tenantId }`) is Prisma's supported "extended where unique" shape: the
+ * unique field stays satisfied, `tenantId` becomes an additional required condition, and the
+ * merge order means a client-supplied `tenantId` in the body is always overwritten by the real
+ * one, never trusted (PRD §52) — same guarantee the AND-wrap gives the general case.
+ */
+const UNIQUE_WHERE_OPERATIONS = new Set([
+  'findUnique',
+  'findUniqueOrThrow',
+  'update',
+  'upsert',
+  'delete',
+]);
+
 export interface OperationParams {
   model?: string;
   operation: string;
@@ -57,7 +79,9 @@ export function applyTenantScoping(
 
   if (WHERE_OPERATIONS.has(operation)) {
     const existingWhere = (scopedArgs.where ?? {}) as Record<string, unknown>;
-    scopedArgs.where = { AND: [existingWhere, { tenantId }] };
+    scopedArgs.where = UNIQUE_WHERE_OPERATIONS.has(operation)
+      ? { ...existingWhere, tenantId }
+      : { AND: [existingWhere, { tenantId }] };
   }
 
   switch (operation) {

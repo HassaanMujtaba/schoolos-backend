@@ -13,7 +13,17 @@
  */
 export const TENANT_SCOPED_MODELS = new Set<string>([
   'Branch',
+  'Building',
+  'Department',
   'User',
   'UserRole',
   'AuditLog',
+  // Phase 2 — School Setup & Core Entities (see ../../../implementation-plan.md)
+  'School',
+  'AcademicYear',
+  'Term',
+  'Holiday',
+  'SchoolClass',
+  'Section',
+  'Subject',
 ]);

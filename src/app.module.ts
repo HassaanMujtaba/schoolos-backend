@@ -11,6 +11,8 @@ import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { UsersModule } from './users/users.module';
+import { TenantsModule } from './tenants/tenants.module';
+import { SchoolSetupModule } from './school-setup/school-setup.module';
 
 @Module({
   imports: [
@@ -26,7 +28,9 @@ import { UsersModule } from './users/users.module';
     HealthModule,
     UsersModule,
     AuthModule,
-    // Phase 2+ feature modules mount here, in the order listed in
+    TenantsModule,
+    SchoolSetupModule,
+    // Phase 3+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [
