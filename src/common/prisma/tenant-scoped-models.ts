@@ -43,4 +43,7 @@ export const TENANT_SCOPED_MODELS = new Set<string>([
   'LeaveRequest',
   'Homework',
   'HomeworkSubmission',
+  // Phase 5 — Examinations (see ../../../implementation-plan.md)
+  'Exam',
+  'ExamMark',
 ]);

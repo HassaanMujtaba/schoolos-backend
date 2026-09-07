@@ -110,9 +110,19 @@ const PERMISSIONS: string[] = [
   'homework.update',
   'homework.delete',
   'homework.grade',
+  // Phase 5 (Examinations) — corrected the same way every earlier phase's own row was: the
+  // `exams.manage`/`marks.enter` placeholders below were this catalog's original draft, but the
+  // actually-built frontend (`ExamsTable.tsx`'s `usePermission('exams.update'/'results.enter'/
+  // 'results.read')`, `ExamsListPage.tsx`'s `usePermission('exams.create')`, `ResultsPage.tsx`'s
+  // `usePermission('results.publish')`) calls different strings — see
+  // ../implementation-plan.md's Phase 5 section. `exams.read` is kept (gates `GET /exams`/
+  // `GET /exams/:id` server-side, same "not client-gated but still enforced" reasoning as
+  // `homework.grade`) even though nothing client-side checks it before rendering the exams list.
   'exams.read',
-  'exams.manage',
-  'marks.enter',
+  'exams.create',
+  'exams.update',
+  'results.enter',
+  'results.read',
   'results.publish',
   'fees.read',
   'fees.create',

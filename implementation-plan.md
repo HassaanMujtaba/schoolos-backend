@@ -669,32 +669,117 @@ design.
 
 ---
 
-### Phase 5 — Examinations
+### Phase 5 — Examinations ✅ built, backend side confirmed
 
 Pairs with **frontend Phase 5 (done)** —
 [`frontend/modules/examinations.md`](../frontend/modules/examinations.md).
 
+**Status:** `examinations/` built (`src/examinations/`), migration `20260907192841_phase5_examinations`
+applied, e2e-tested against a live Postgres/Redis (`test/examinations.e2e-spec.ts`: 23 tests —
+exam CRUD + permission gating + tenant isolation, the marks-entry-sheet roster, bulk marks
+submission with cross-field/max-marks/roster validation and upsert-in-place correction, grade/GPA/
+rank computation, the publish lock and its `results.publish`-holder reopen override, and the
+report-card endpoint's own ownership + publish-state access control for both a linked student and
+a linked parent). `npm run verify` green; the full e2e suite is green except the pre-existing
+MinIO-unreachable-in-this-environment gap (`documents`/`people-documents.e2e-spec.ts` — Phase 3's
+own documented gap, unrelated to this phase, nothing here touches object storage) and one
+already-failing `health.e2e-spec.ts` assertion from the same MinIO gap.
+
+**Two schema corrections against the real frontend source, same discipline as every earlier
+phase's own correction notes:**
+
+- **No separate `Mark`/`Result`/`Grade`/`ReportCard` entities.** This plan's original Phase 5
+  entity list had all four; `features/examinations/api.ts`'s `ExamResultRow`/`ReportCard` shapes
+  are entirely server-computed from one `ExamMark` row per `(exam, student)` plus a fixed grading
+  scale, never stored — same "no separate aggregate entity" correction as Phase 3's
+  `AdmissionInquiry` / Phase 4's `Timetable` header entity.
+- **Report cards group sibling `Exam` rows, they're not one `Exam` row.** `examSchema`'s
+  `subjectId` is a single field — an `Exam` is one subject's sitting, not a multi-subject exam
+  period — but `ReportCard.subjects[]` is multi-subject. `examinations.service.ts`'s
+  `getReportCard` resolves this by treating every `Exam` sharing the same `(type, classId,
+sectionId)` as one series (e.g. every "Midterm" exam for class 7-A across subjects); there is no
+  separate `ExamSeries`/`ExamGroup` entity, the grouping key is computed at read time. `examName`
+  (present on `ReportCard` but not on `Exam` itself, which has no name field) is the exam type's
+  display label (`EXAM_TYPE_LABELS`, mirroring the frontend's own map).
+
+**Permission catalog correction (same pattern as every earlier phase's own row):** the
+`exams.manage`/`marks.enter` placeholders are replaced by the granular strings the actually-built
+frontend calls (`ExamsTable.tsx`'s `usePermission('exams.update'/'results.enter'/'results.read')`,
+`ExamsListPage.tsx`'s `usePermission('exams.create')`, `ResultsPage.tsx`'s
+`usePermission('results.publish')`) — `exams.read` is kept (gates `GET /exams`/`GET /exams/:id`
+server-side) even though nothing client-side checks it before rendering the list, same
+"not client-gated but still enforced" reasoning as Phase 4's `homework.grade`. `prisma/seed.ts`
+now seeds the corrected strings.
+
+**Two real design decisions this phase had to make that the frontend's assumed contract doesn't
+fully settle, both flagged rather than guessed silently:**
+
+- **Grading scale.** PRD §16 lists "Grade calculation"/"GPA"/"Percentage" as features but specifies
+  no actual scale, and `school-setup.md`'s own "Grading systems" config screen is deferred —
+  `examinations.md`'s "Open questions" already flags this exact gap ("re-verify once the school's
+  grading-system config... actually exists"). `src/examinations/grading-scale.ts` implements **one
+  fixed percentage → grade/GPA scale, applied tenant-wide** (an eight-band A+–F scale, 4.0 GPA) —
+  a real, honestly-flagged placeholder, same standard as `timetable.service.ts`'s `generate()`
+  filler — not a per-school setting invented to look configurable. Swap for a real per-tenant
+  lookup once that config screen ships; nothing downstream needs to change shape when it does.
+- **Marks-lock reopen.** `examinations.md`'s "Marks entry" section says publish "locks further
+  marks edits unless re-opened by an authorized role," but the frontend's built contract
+  (`api.ts`) has no separate unlock/reopen endpoint. Resolved by treating `results.publish` itself
+  as the override: `POST /exams/:id/marks` 409s once `Exam.isPublished` is true unless the caller
+  holds `results.publish`, in which case the edit goes through anyway. No new endpoint, no schema
+  change — see `Exam.isPublished`'s own schema doc comment.
+- **Report-card access control** (the one endpoint shared by the back office and the Parent/
+  Student portal — `PortalResultsPage`'s own comment: "whether an exam's results are actually
+  published yet is left to the report-card endpoint itself to enforce"): no `@RequirePermission`
+  on `GET /report-cards/:studentId` (portal callers hold zero permissions in the seeded catalog,
+  same reasoning `LeaveController`'s shared `/leave/student` routes already document) — a caller
+  holding `results.read` gets any student's card regardless of publish state (the staff-preview
+  case); everyone else must own the record (the student themselves via `Student.userId`, or a
+  linked parent via `Parent.userId`/`ParentStudentLink` — the same `assertCanActForStudent`
+  ownership pattern `LeaveService` already uses) **and** the anchor exam must be published.
+
 **Module:** `examinations/`.
 
-**Entities:** `Exam`, `ExamSchedule`, `Mark`, `Result`, `Grade`, `ReportCard`.
+**Entities:** `Exam` (single-subject, `isPublished` flag — see the schema corrections above),
+`ExamMark` (one row per student per exam, no explicit `tenant` relation, same high-volume-leaf
+trade-off `AttendanceRecord`/`HomeworkSubmission` already make).
 
-**Endpoints:**
+**Endpoints (as actually built):**
 
 ```
-CRUD /exams                       + a studentId filter for the portal list (flagged open)
-GET  /exams/:id/marks-entry-sheet  one row per enrolled student, for the bulk grid
-POST /exams/:id/marks              bulk upsert
-GET  /exams/:id/results            grade/GPA/rank — server-computed, never recomputed client-side
-                                   (frontend's own resolved assumption — keep it that way)
-POST /exams/:id/publish            gated server-side by results.publish too, not just frontend RBAC
-GET  /report-cards/:studentId
+GET   /exams                      ?classId=&sectionId= | ?studentId= (accepts 'me', portal) —
+                                  paginated, exams.read
+GET   /exams/:id                  exams.read
+POST  /exams                      exams.create
+PATCH /exams/:id                  exams.update — 409s if the exam is published and the caller
+                                  lacks results.publish (same lock/override as marks, below)
+GET   /exams/:id/marks-entry-sheet one row per student enrolled in the exam's class/section,
+                                  pre-filled from any ExamMark already entered — results.enter
+POST  /exams/:id/marks            bulk upsert on [examId, studentId] — resubmitting corrects in
+                                  place; rejects a record missing both marks and isAbsent, marks
+                                  over maxMarks, and a student outside the exam's class/section;
+                                  409s once published unless the caller holds results.publish —
+                                  results.enter
+GET   /exams/:id/results          grade/GPA/rank — server-computed, standard competition ranking
+                                  (ties share a rank, absent/ungraded students are null-ranked,
+                                  never last-place) — results.read
+POST  /exams/:id/publish          sets isPublished — results.publish
+GET   /report-cards/:studentId    ?examId= — accepts 'me' in the path; no route-level permission
+                                  gate, see the report-card access-control decision above
 ```
 
-**Integration task:** grade/GPA/ranking calculation is entirely a backend concern per the
-frontend's already-resolved assumption — implement the actual grading-scale logic here (PRD §16),
-confirm the `studentId` filter on `GET /exams`, and do the one piece of verification that can't be
-automated: a real-browser print-preview check of `/report-cards/:studentId` against real data
-(`modules/examinations.md`'s own still-open item).
+**Not built this phase, deliberately deferred:** transcripts (multi-term/multi-year summary) stay
+Phase 7+/reports scope, per `examinations.md`'s own resolved note — this phase's report card is
+per-exam-series only. Online Examination (§17: question bank, MCQ/timed/auto-graded) is out of
+scope entirely, same resolved note. A real browser print-preview check of `ReportCardPage` against
+this live data is still a manual step (`examinations.md`'s own definition of done) — not something
+this phase's automated e2e coverage can substitute for.
+
+**Integration task:** run `frontend`'s existing examinations component/hook tests against this real
+backend locally (not just their own mocks) once Postgres/Redis are reachable together — every
+contract question this phase had (the grading scale, the report-card series grouping, the marks
+lock/reopen, the report-card access model) is resolved above, so, like Phases 2–4, what's left is
+verification plus the one manual print-preview check, not design.
 
 ---
 
@@ -1061,25 +1146,25 @@ The actual side-by-side status, phase by phase. Update this table as each phase'
 completes — it's the single place that answers "is this module really done, or just done on one
 side?"
 
-| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                         | Integration                                                                                                                              |
-| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                | — (no frontend-facing surface)                                                                                                           |
-| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                               | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                             |
-| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                    | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                   |
-| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time) | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending |
-| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                    | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending       |
-| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                                                  | ⏳ blocked on backend — **this is the real MVP integration milestone**                                                                   |
-| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; fee-linkage decision needed first                                                                                 |
-| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                    |
-| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                    |
-| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                           |
-| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                  | ⏳ backend's tool-calling layer must land before either side does feature work                                                           |
+| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                         | Integration                                                                                                                               |
+| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                | — (no frontend-facing surface)                                                                                                            |
+| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                               | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                              |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                    | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                    |
+| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time) | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending  |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                    | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending        |
+| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                    | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending |
+| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ⏳ not started                                                                                                                  | ⏳ blocked on backend — **this is the real MVP integration milestone**                                                                    |
+| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
+| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
+| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
+| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
+| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; fee-linkage decision needed first                                                                                  |
+| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                     |
+| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
+| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                     |
+| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                            |
+| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                  | ⏳ backend's tool-calling layer must land before either side does feature work                                                            |
 
 **Reading this table:** the frontend column is almost entirely "done" already — that's the starting
 condition this whole plan was written for, not a milestone to celebrate mid-project. The real work

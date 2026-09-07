@@ -23,6 +23,7 @@ import { AdmissionsModule } from './admissions/admissions.module';
 import { TimetableModule } from './timetable/timetable.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { HomeworkModule } from './homework/homework.module';
+import { ExaminationsModule } from './examinations/examinations.module';
 
 @Module({
   imports: [
@@ -52,7 +53,9 @@ import { HomeworkModule } from './homework/homework.module';
     TimetableModule,
     AttendanceModule,
     HomeworkModule,
-    // Phase 5+ feature modules mount here, in the order listed in
+    // Phase 5 — Examinations.
+    ExaminationsModule,
+    // Phase 6+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [

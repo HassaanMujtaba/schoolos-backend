@@ -51,6 +51,7 @@ model Tenant {
   timetableEntries TimetableEntry[]
   substitutions    Substitution[]
   homework         Homework[]
+  exams            Exam[]
 
   @@map("tenants")
 }
@@ -502,6 +503,7 @@ model Student {
   attendanceRecords   AttendanceRecord[]
   leaveRequests       LeaveRequest[]
   homeworkSubmissions HomeworkSubmission[]
+  examMarks           ExamMark[]
 
   @@unique([tenantId, admissionNumber])
   @@index([tenantId])
@@ -921,6 +923,106 @@ model HomeworkSubmission {
   @@index([homeworkId])
   @@index([studentId])
   @@map("homework_submissions")
+}
+
+// ---------------------------------------------------------------------------
+// Examinations (PRD §16, Phase 5) — `frontend/modules/examinations.md` "Backend dependencies" is
+// the source contract. Two corrections against the real frontend source, same discipline as every
+// earlier phase's own correction notes:
+//
+// 1. No separate `Mark`/`Result`/`Grade`/`ReportCard` entities (`../implementation-plan.md`'s
+//    original Phase 5 entity list had all four) — `features/examinations/api.ts`'s `ExamResultRow`/
+//    `ReportCard` shapes are entirely server-computed from one `ExamMark` row per (exam, student)
+//    plus the fixed grading scale below, never stored; same "no separate aggregate entity"
+//    correction as Phase 3's `AdmissionInquiry` / Phase 4's `Timetable` header entity.
+// 2. `Exam` is single-subject (`examSchema`'s `subjectId` is one field, not a list) — a report
+//    card's multi-subject view is **not** one `Exam` row, it's every `Exam` sharing the same
+//    `(type, classId, sectionId)` treated as one series (e.g. every "Midterm" exam for class 5-A
+//    across subjects). `examinations.service.ts`'s `getReportCard` resolves this explicitly; there
+//    is no separate `ExamSeries`/`ExamGroup` entity, the grouping key is computed at read time.
+// ---------------------------------------------------------------------------
+
+// PRD §16 "Exam Types" — matches `EXAM_TYPES` in `frontend/src/features/examinations/schemas.ts`
+// verbatim, same lowercase-member-name convention as `SubjectType`/`AttendanceStatus`.
+enum ExamType {
+  quiz
+  monthly
+  midterm
+  final
+  practical
+  oral
+  entrance
+  assignment
+}
+
+/// One row per subject per exam sitting. `room`/`invigilatorId` are free text, same
+/// `Section.roomLabel`/`TimetableEntry.roomId` no-Room-entity trade-off — `invigilatorId` is
+/// actually a `Teacher` id string, not validated by a DB foreign key (soft-validated at the
+/// application layer when non-empty, matching `classIds`/`subjectIds`'s existing trade-off), and
+/// stays empty for exam types that genuinely don't need one (`examSchema`'s own comment: "not
+/// every exam type needs one"). `isPublished` isn't part of the frontend's own `Exam` type
+/// (`api.ts extends ExamFormValues { id }` — no publish flag on the exam itself) — it's this
+/// schema's own field backing `ExamResults.isPublished`, deliberately not echoed on the plain
+/// `Exam` response so as not to invent a field the frontend doesn't expect there.
+model Exam {
+  id            String   @id @default(uuid())
+  tenantId      String
+  type          ExamType
+  subjectId     String
+  classId       String
+  sectionId     String
+  date          DateTime @db.Date
+  startTime     String   @default("")
+  endTime       String   @default("")
+  room          String   @default("")
+  invigilatorId String   @default("")
+  maxMarks      Float
+  /// Set by `POST /exams/:id/publish` (`results.publish`). Locks further `POST /exams/:id/marks`
+  /// edits — see `ExamMarksService`'s own doc comment — unless the caller holds `results.publish`
+  /// themselves, which doubles as the "re-opened by an authorized role" override
+  /// `examinations.md`'s "Marks entry" section names, since no separate unlock endpoint exists on
+  /// the frontend's built contract.
+  isPublished   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  marks  ExamMark[]
+
+  @@index([tenantId])
+  @@index([classId, sectionId])
+  @@index([subjectId])
+  @@index([type, classId, sectionId])
+  @@map("exams")
+}
+
+/// One row per student per exam — the only stored fact; grade/percentage/GPA/rank are all
+/// computed at read time (see this section's header comment). No explicit `tenant Tenant
+/// @relation` here, same trade-off `AttendanceRecord`/`HomeworkSubmission` already make: this is
+/// the high-volume leaf table, `tenantId` stays a plain scoped column and `examId`/`studentId`
+/// carry the real relations. `@@unique([examId, studentId])` (no `tenantId` in the compound key,
+/// same reasoning as `AttendanceRecord`'s `[studentId, date]`) is also the bulk-upsert key `POST
+/// /exams/:id/marks` needs — resubmitting the grid corrects it in place.
+model ExamMark {
+  id            String   @id @default(uuid())
+  tenantId      String
+  examId        String
+  studentId     String
+  /// `null` when not yet entered *or* when absent — `isAbsent` is the field that disambiguates
+  /// the two, same "0 marks" vs. "didn't sit the exam" split `marksEntryRecordSchema`'s own
+  /// `.refine()` enforces on the frontend (re-enforced server-side, not just trusted).
+  marksObtained Float?
+  isAbsent      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  exam    Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([examId, studentId])
+  @@index([tenantId])
+  @@index([studentId])
+  @@map("exam_marks")
 }
 
 // ---------------------------------------------------------------------------
