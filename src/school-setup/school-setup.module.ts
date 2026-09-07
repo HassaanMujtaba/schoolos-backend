@@ -31,5 +31,10 @@ import { SubjectsService } from './subjects/subjects.service';
     SectionsService,
     SubjectsService,
   ],
+  // `SchoolsService` is exported for Phase 7.1's `CertificatesModule` — certificate PDFs apply
+  // school branding (name/logo) automatically per `modules/documents-certificates.md`'s
+  // "Certificates" requirements, reusing this service's own lazy-create-on-first-access semantics
+  // rather than duplicating that `getOrCreate` logic.
+  exports: [SchoolsService],
 })
 export class SchoolSetupModule {}

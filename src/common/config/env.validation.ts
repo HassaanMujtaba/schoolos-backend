@@ -83,6 +83,16 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   S3_REGION = 'us-east-1';
+
+  // Phase 7.1 — the canonical origin `certificates.service.ts` bakes into a generated
+  // certificate's QR code (`frontend/src/features/certificates/lib/verifyLink.ts`'s
+  // `buildVerifyUrl` builds the same `${origin}/certificates/verify/:code` shape client-side from
+  // `window.location.origin`; the server has no request-time "origin" for a PDF rendered once and
+  // stored, so this is the one explicit config value standing in for it). Defaults to the
+  // frontend's own Vite dev-server port, matching `CORS_ORIGINS`' first entry in `.env.example`.
+  @IsString()
+  @IsOptional()
+  FRONTEND_BASE_URL = 'http://localhost:5173';
 }
 
 export function validateEnv(

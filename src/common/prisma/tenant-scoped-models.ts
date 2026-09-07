@@ -50,4 +50,6 @@ export const TENANT_SCOPED_MODELS = new Set<string>([
   'FeeStructure',
   'Invoice',
   'Payment',
+  // Phase 7.1 — Documents & Certificates (see ../../../implementation-plan.md)
+  'Certificate',
 ]);

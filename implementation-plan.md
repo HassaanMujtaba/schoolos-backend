@@ -917,26 +917,105 @@ The frontend already shipped **every one of these** (except AI Assistant) agains
 contracts. Build the backend in the same order the frontend already established, so each
 integration pass has a finished, waiting frontend rather than the reverse:
 
-#### 7.1 — Documents & Certificates (do early — Phase 3 already needs the base upload endpoint)
+#### 7.1 — Documents & Certificates ✅ built, backend side confirmed (do early — Phase 3 already needs the base upload endpoint)
 
 [`modules/documents-certificates.md`](../frontend/modules/documents-certificates.md)
 
-- **Module:** `documents/` (extend Phase 3's primitive with the browse/search library + version
-  history), `certificates/`.
-- **Entities:** `Document`, `DocumentVersion`, `CertificateTemplate`, `Certificate`.
-- **Endpoints:**
-  ```
-  GET  /documents?category=&ownerId=
-  GET  /documents/:id/versions
-  POST /certificates/generate      template + dynamic fields → PDF, QR, unique cert number
-  GET  /certificates/verify/:code  PUBLIC, unauthenticated — no session required, matches the
-                                   frontend's own bare-axios (non-apiClient) call
-  ```
-- **Integration task:** decide whether certificate dynamic fields come from a
-  `POST /certificates/generate`-adjacent template-config endpoint or stay a frontend-fixed set
-  (`CERTIFICATE_TEMPLATE_FIELDS`) — currently assumed-fixed, flagged open by the module doc. Also
-  resolve §26's audited-access-reason requirement for medical documents specifically (an
-  access-reason prompt beyond normal RBAC) — not built on either side yet.
+**Status:** the documents/ storage half needed nothing new — Phase 3's `POST /documents/upload` /
+`GET /documents?category=&ownerId=` / `GET /documents/:id/versions` already are this module doc's
+"Backend dependencies" list verbatim, confirmed again this phase rather than re-guessed. The actual
+new work is `certificates/` (`src/certificates/`): template selection, dynamic-field validation,
+real PDF generation (`pdf-lib` + `qrcode`, newly added dependencies — no existing PDF/QR library in
+this codebase), object storage, and the public QR-verify lookup. Migration
+`20260907205316_phase7_1_documents_certificates` applied; `test/certificates.e2e-spec.ts` (10
+tests: per-template required-field validation including the `custom`-needs-`customTitle` case,
+tenant isolation on `studentId`, permission gating, a real PDF-generation-and-storage round trip
+asserting actual `%PDF` magic bytes at the signed URL — not just a well-formed URL string — and the
+public verify endpoint with **no `Authorization` header sent at all**, both the valid-code and
+unknown-code-404 cases). `npm run verify` green; the **full e2e suite (152 tests, all 8 spec
+files) is green against a genuinely live Postgres/Redis/MinIO stack** — see the MinIO note below,
+this is the first phase where that's true without a caveat.
+
+**A real infra bug found and fixed, not just this phase's own code:** every earlier phase's status
+notes ("MinIO not reachable in this environment") turned out to be one root cause, not an
+environment limitation to keep working around — something outside Docker on the dev machine this
+was built on was already bound to host port 9000 (and 6379, coincidentally harmless there since a
+native Redis on that port serves the same purpose), silently swallowing `docker compose up -d`'s
+minio container start (`docker ps` showed it `Created`, never `Running`, easy to miss). Fixed by
+remapping MinIO's host-side ports to 19000/19001 in `docker-compose.yml` (the container's own
+internal ports are unchanged) and updating `S3_ENDPOINT` in `.env`/`.env.example` to match — see
+that file's own comment. This is why this phase is the first one able to actually verify a real
+upload → storage → signed-URL → byte-for-byte download round trip in this environment instead of
+documenting it as a gap; worth re-running Phase 3–6's own e2e suites after this fix too (done — all
+152 tests across every phase's spec file pass together now).
+
+**Certificate dynamic fields — resolved, not left open:** kept the frontend's fixed
+`CERTIFICATE_TEMPLATE_FIELDS` set, mirrored server-side (`certificates/certificate-templates.ts`)
+and enforced as a real required-field check in `CertificatesService`, not just a client-side form
+convenience — same "real, honestly-flagged placeholder" standard `examinations/grading-scale.ts`'s
+fixed grading scale already set, not a template-config endpoint nobody asked for. Swap for a real
+per-tenant/template-config lookup later; nothing downstream needs to change shape when that
+happens.
+
+**Two real design decisions this phase had to make that neither module doc fully settles, both
+flagged rather than guessed silently:**
+
+- **`verifyCode` vs. `certificateNumber` are deliberately two different values**, not one —
+  `certificateNumber` is the human-displayed, printed identifier; `verifyCode` (higher entropy,
+  `randomBytes(16)`) is the only thing standing between "read this certificate holder's name with
+  no login" and a real access control, since `GET /certificates/verify/:code` is genuinely public.
+  See `Certificate.verifyCode`'s own schema.prisma doc comment.
+- **The verify lookup needed a new sanctioned `PlatformPrismaService` call site** — a public,
+  unauthenticated QR scan has no per-request tenant in context at all (not even a wrong one), so it
+  can't go through the normal tenant-scoped `PrismaService` (`tenant-scoping.ts` fails closed on a
+  missing tenant, by design). This is a third sanctioned use, alongside the two
+  `platform-prisma.service.ts`'s own doc comment already lists (auth's pre-tenant-context user
+  lookups, the Phase 7.9 Platform Console) — flagged here and in that file's own comment rather than
+  silently added as a fourth undocumented one.
+
+**Not built this phase, deliberately deferred, same discipline as every earlier phase's own
+"flag, don't guess" calls:**
+
+- **§26's audited-access-reason requirement for medical documents** (an access-reason prompt beyond
+  normal RBAC) — still open on both sides, needs a real product conversation about what that UX
+  looks like before either side builds it.
+- **A logo/letterhead image on the generated PDF** — `renderCertificatePdf` renders school-name
+  text branding only; embedding `School.logoUrl` (an arbitrary stored URL) would mean this service
+  fetching an external URL server-side on every generate call, new outbound-request surface
+  (`security-standards`' SSRF guidance) for a purely cosmetic addition nobody asked for. Revisit
+  once school-profile logo uploads go through the `documents/` primitive instead of a free-text
+  URL — see `certificate-pdf.ts`'s own doc comment.
+- **A `GET /certificates/:id` single-get endpoint** — `certificates/api.ts` never calls one
+  (`CertificateTable`'s row actions link straight to `pdfUrl`/the verify link from the list
+  response), so none was built; additive if a later screen needs it.
+
+**Module:** `documents/` (unchanged, Phase 3), `certificates/`.
+
+**Entities:** `Document`, `DocumentVersion` (unchanged, Phase 3), `CertificateTemplate`,
+`Certificate` (`studentId` a real FK — unlike `AdmissionApplication.admissionFeeInvoiceId`, this
+entity didn't predate the thing it references).
+
+**Endpoints (as actually built):**
+
+```
+GET  /documents?category=&ownerId=   unchanged, Phase 3
+GET  /documents/:id/versions         unchanged, Phase 3
+GET  /certificates                    ?studentId= — certificates.read
+POST /certificates/generate           template + dynamic fields → real PDF, QR, unique cert
+                                      number — certificates.generate; 400s on a missing required
+                                      template field or a missing customTitle for `custom`
+GET  /certificates/verify/:code       PUBLIC, unauthenticated (@Public(), no session required) —
+                                      matches the frontend's own bare-axios (non-apiClient) call;
+                                      404s an unknown code rather than a `{ valid: false }` 200
+```
+
+**Integration task:** run `frontend`'s existing documents/certificates component and hook tests
+against this real backend locally (not just their own mocks) — every contract question this phase
+had (dynamic fields, the verify lookup's access model) is resolved above, so, like Phases 2–6,
+what's left is verification, not design. Wiring the existing `FileUploadField` consumers (Students,
+Admissions, Homework, Transport) to the real `POST /documents/upload` — this module doc's own
+long-standing "Open questions" item — is still open, and still frontend work, not blocked on
+anything backend-side.
 
 #### 7.2 — Library
 
@@ -1237,25 +1316,25 @@ The actual side-by-side status, phase by phase. Update this table as each phase'
 completes — it's the single place that answers "is this module really done, or just done on one
 side?"
 
-| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                         | Integration                                                                                                                                                                                                |
-| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                | — (no frontend-facing surface)                                                                                                                                                                             |
-| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                               | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                                                                                               |
-| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                    | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                                                                                     |
-| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time) | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending                                                                   |
-| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                    | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending                                                                         |
-| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                    | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending                                                                  |
-| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ✅ built + e2e-tested against live Postgres/Redis (33 tests) + confirmed the admissions↔fees integration end-to-end             | ⏳ backend confirmed (see Phase 6 notes above) — **PRD §65 MVP genuinely end-to-end once frontend's Phase 6 screens are re-verified against these real endpoints**; cross-stack verification still pending |
-| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; fee-linkage decision needed first                                                                                                                                                   |
-| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                                                                                      |
-| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                  | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                                                                                             |
-| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                  | ⏳ backend's tool-calling layer must land before either side does feature work                                                                                                                             |
+| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                                                                                      | Integration                                                                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                                                                             | — (no frontend-facing surface)                                                                                                                                                                             |
+| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                                                                                            | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                                                                                               |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                                                                                 | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                                                                                     |
+| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time)                                                              | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending                                                                   |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                                                                                 | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending                                                                         |
+| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                                                                                 | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending                                                                  |
+| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ✅ built + e2e-tested against live Postgres/Redis (33 tests) + confirmed the admissions↔fees integration end-to-end                                                                          | ⏳ backend confirmed (see Phase 6 notes above) — **PRD §65 MVP genuinely end-to-end once frontend's Phase 6 screens are re-verified against these real endpoints**; cross-stack verification still pending |
+| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (10 new tests; also fixed a MinIO-reachability infra bug that had been silently affecting every earlier phase — see Phase 7.1 notes) | ⏳ backend confirmed (see Phase 7.1 notes above); cross-stack verification still pending                                                                                                                   |
+| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend; fee-linkage decision needed first                                                                                                                                                   |
+| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                                                                                      |
+| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
+| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                                                                                             |
+| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                                                                               | ⏳ backend's tool-calling layer must land before either side does feature work                                                                                                                             |
 
 **Reading this table:** the frontend column is almost entirely "done" already — that's the starting
 condition this whole plan was written for, not a milestone to celebrate mid-project. The real work

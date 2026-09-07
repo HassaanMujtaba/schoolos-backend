@@ -37,8 +37,15 @@ services:
       MINIO_ROOT_USER: schoolos
       MINIO_ROOT_PASSWORD: schoolos123
     ports:
-      - '9000:9000' # S3 API
-      - '9001:9001' # web console
+      # Host-side 19000/19001, not the "standard" 9000/9001 — found live this phase: something
+      # outside Docker was already squatting 9000/6379 on the dev machine this was built on (not a
+      # MinIO/Postgres/Redis process; connections reset rather than serving HTTP), which is why
+      # every earlier phase's status notes flag "MinIO unreachable in this environment" despite
+      # `docker compose up -d` succeeding — the container itself never actually started, silently.
+      # `S3_ENDPOINT` in `.env.example` matches this mapping; the container's own internal port
+      # (9000/9001) is unchanged, only the host mapping moved.
+      - '19000:9000' # S3 API
+      - '19001:9001' # web console
     volumes:
       - minio-data:/data
     healthcheck:

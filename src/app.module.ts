@@ -26,6 +26,7 @@ import { HomeworkModule } from './homework/homework.module';
 import { ExaminationsModule } from './examinations/examinations.module';
 import { FeesModule } from './fees/fees.module';
 import { SearchModule } from './search/search.module';
+import { CertificatesModule } from './certificates/certificates.module';
 
 @Module({
   imports: [
@@ -62,7 +63,10 @@ import { SearchModule } from './search/search.module';
     // regardless of this array's order, listed here to match the phase table.
     FeesModule,
     SearchModule,
-    // Phase 7+ feature modules mount here, in the order listed in
+    // Phase 7.1 — Documents & Certificates. The documents/ storage half was already built in
+    // Phase 3 (see DocumentsModule above); this is just the certificate-generation half.
+    CertificatesModule,
+    // Phase 7.2+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [

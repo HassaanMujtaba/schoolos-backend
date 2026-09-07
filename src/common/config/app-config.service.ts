@@ -77,6 +77,14 @@ export class AppConfigService {
     return this.config.get<string>('S3_REGION', 'us-east-1');
   }
 
+  // Phase 7.1 — see `env.validation.ts`'s own doc comment on `FRONTEND_BASE_URL`.
+  get frontendBaseUrl(): string {
+    return this.config.get<string>(
+      'FRONTEND_BASE_URL',
+      'http://localhost:5173',
+    );
+  }
+
   private getOrThrow(key: string): string {
     const value = this.config.get<string>(key);
     if (!value) {

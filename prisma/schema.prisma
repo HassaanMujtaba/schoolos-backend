@@ -54,6 +54,7 @@ model Tenant {
   exams            Exam[]
   feeStructures    FeeStructure[]
   invoices         Invoice[]
+  certificates     Certificate[]
 
   @@map("tenants")
 }
@@ -507,6 +508,7 @@ model Student {
   homeworkSubmissions HomeworkSubmission[]
   examMarks           ExamMark[]
   invoices            Invoice[]
+  certificates        Certificate[]
 
   @@unique([tenantId, admissionNumber])
   @@index([tenantId])
@@ -722,6 +724,63 @@ model DocumentVersion {
   @@unique([documentId, version])
   @@index([tenantId])
   @@map("document_versions")
+}
+
+/// §32 Certificate templates — `frontend/src/features/certificates/schemas.ts`'s
+/// `CERTIFICATE_TEMPLATES`, same lowercase-enum-member-matches-frontend-string convention as
+/// `FeeType`/`SubjectType`.
+enum CertificateTemplate {
+  bonafide
+  enrollment
+  character
+  transfer
+  leaving
+  achievement
+  custom
+}
+
+/// §32 Certificates — one row per generated certificate, the PDF itself lives in object storage
+/// (`storageKey`, same never-store-a-directly-fetchable-URL discipline `DocumentVersion` already
+/// established — every read resolves a fresh presigned `pdfUrl` via `StorageService`).
+///
+/// `certificateNumber` (human-displayed, printed on the PDF, unique per tenant) and `verifyCode`
+/// (the opaque token embedded in the QR / used as `GET /certificates/verify/:code`'s path param)
+/// are deliberately two different values, not one — `verifyCode` is generated with more entropy
+/// (`certificates.service.ts`'s own comment) since, unlike `certificateNumber`, it's the only
+/// thing standing between "anyone with this code can read this certificate's holder name with no
+/// login" and a real access control — see the verify endpoint's own doc comment for why that
+/// lookup is a public, cross-tenant `PlatformPrismaService` read (no per-request tenant exists for
+/// an unauthenticated QR scan), a third sanctioned call site alongside the two
+/// `platform-prisma.service.ts` already documents.
+///
+/// `fields` is the template's dynamic-field values (`Record<string,string>`, keyed by
+/// `CERTIFICATE_TEMPLATE_FIELDS`' `key`s) — display-only JSON, same trade-off as
+/// `Invoice.lineItems`, since these are baked into the rendered PDF at generation time and never
+/// recomputed. `title` is server-derived at generation time (the template's display label, or
+/// `customTitle` for `custom`) — never trusted from the client for the same reason
+/// `studentLabel`/`schoolName` in the verify response are always re-resolved from the real
+/// `Student`/`School` rows, not persisted from the generate request.
+model Certificate {
+  id                String              @id @default(uuid())
+  tenantId          String
+  studentId         String
+  template          CertificateTemplate
+  title             String
+  fields            Json                @default("{}")
+  certificateNumber String
+  verifyCode        String              @unique
+  storageKey        String
+  generatedByUserId String?
+  generatedByLabel  String
+  createdAt         DateTime            @default(now())
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@unique([tenantId, certificateNumber])
+  @@index([tenantId])
+  @@index([studentId])
+  @@map("certificates")
 }
 
 // ---------------------------------------------------------------------------
