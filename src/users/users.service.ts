@@ -73,13 +73,22 @@ export class UsersService {
     return user && user.status === 'ACTIVE' ? toAuthProfile(user) : null;
   }
 
-  async updatePasswordHash(
+  /**
+   * Sets a new password and, as of Phase 7.9, also flips `status` to `ACTIVE` unconditionally.
+   * Previously (Phase 1) this only ever ran for an already-`ACTIVE` account resetting a forgotten
+   * password, so the extra write was a no-op; Phase 7.9's `POST /platform/schools` is the first
+   * caller that creates a user as `INVITED` (no usable password yet), and this same
+   * `POST /auth/reset-password` flow is how that account sets its first real password and becomes
+   * able to log in at all — `AuthService.issueInviteToken` is what gets them a valid token for it,
+   * since `forgotPassword`'s own lookup only resolves already-`ACTIVE` accounts.
+   */
+  async setPasswordAndActivate(
     userId: string,
     passwordHash: string,
   ): Promise<void> {
     await this.platformPrisma.user.update({
       where: { id: userId },
-      data: { passwordHash },
+      data: { passwordHash, status: 'ACTIVE' },
     });
   }
 }

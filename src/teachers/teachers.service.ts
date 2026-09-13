@@ -12,19 +12,21 @@ import {
   resolveSortField,
   toSkipTake,
 } from '../common/pagination/paginate';
+import { formatDateOnly, parseDateOnly } from '../common/dates/date-only';
+import { resolveTeacherId } from '../common/identity/resolve-me';
 import { TeacherDto } from './dto/teacher.dto';
 import { AssignmentDto } from './dto/assignment.dto';
 import {
   AssignmentResponseDto,
   TeacherResponseDto,
 } from './dto/teacher-response.dto';
+import { TeacherDashboardDto } from './dto/teacher-dashboard.dto';
 
 const SORTABLE_FIELDS = ['name', 'employeeId', 'createdAt'] as const;
 
 /** `frontend/src/features/teachers/api.ts`'s surface — §10, admin CRUD + subject/class/section
- * assignment. The teacher dashboard (`GET /teachers/me/dashboard`) is Phase 4's, not this
- * module's — it aggregates timetable/attendance/homework/examinations data that doesn't exist
- * yet. */
+ * assignment, plus `getMyDashboard` below (`GET /teachers/me/dashboard`), which aggregates
+ * Timetable/Attendance/Homework/Examinations data now that those Phase 4 modules exist. */
 @Injectable()
 export class TeachersService {
   constructor(private readonly prisma: PrismaService) {}
@@ -201,6 +203,129 @@ export class TeachersService {
       subjectIds: teacher.subjectIds,
       classIds: [...new Set(assignments.map((a) => a.classId))],
     };
+  }
+
+  /**
+   * `GET /teachers/me/dashboard` — resolved entirely from the calling user's own `Teacher.userId`
+   * link (`resolveTeacherId`'s "me" idiom), never a client-supplied teacher id. Reads
+   * Timetable/Attendance/Homework/Examinations data directly (same cross-module raw-Prisma-read
+   * pattern `ReportsService` uses) rather than calling into those modules' services, since this
+   * is a read-only aggregation with no side effects to keep encapsulated.
+   */
+  async getMyDashboard(userId: string): Promise<TeacherDashboardDto> {
+    const teacherId = await resolveTeacherId(this.prisma, 'me', userId);
+    const today = parseDateOnly(formatDateOnly(new Date()));
+    // TimetableEntry.dayOfWeek: 0 = Monday..5 = Saturday (see that field's own doc comment).
+    // A Sunday `getDay()` (0) has no matching slot, which is correct — no school day to show.
+    const jsDay = today.getUTCDay();
+    const dayOfWeek = jsDay === 0 ? -1 : jsDay - 1;
+
+    const [entries, homework, assignments] = await Promise.all([
+      this.prisma.timetableEntry.findMany({
+        where: { teacherId, dayOfWeek },
+        orderBy: { periodIndex: 'asc' },
+      }),
+      this.prisma.homework.findMany({
+        where: { teacherId, deadline: { gte: today } },
+        orderBy: { deadline: 'asc' },
+        take: 5,
+      }),
+      this.prisma.teacherAssignment.findMany({ where: { teacherId } }),
+    ]);
+
+    const classIds = [...new Set(entries.map((e) => e.classId))];
+    const sectionIds = [...new Set(entries.map((e) => e.sectionId))];
+    const subjectIds = [...new Set(entries.map((e) => e.subjectId))];
+    const [classes, sections, subjects] = await Promise.all([
+      this.prisma.schoolClass.findMany({ where: { id: { in: classIds } } }),
+      this.prisma.section.findMany({ where: { id: { in: sectionIds } } }),
+      this.prisma.subject.findMany({ where: { id: { in: subjectIds } } }),
+    ]);
+    const classNames = new Map(classes.map((c) => [c.id, c.name]));
+    const sectionNames = new Map(sections.map((s) => [s.id, s.name]));
+    const subjectNames = new Map(subjects.map((s) => [s.id, s.name]));
+
+    const todayClasses: TeacherDashboardDto['todayClasses'] = entries.map(
+      (entry) => ({
+        id: entry.id,
+        subjectName: subjectNames.get(entry.subjectId) ?? 'Unknown subject',
+        className: classNames.get(entry.classId) ?? 'Unknown class',
+        sectionName: sectionNames.get(entry.sectionId) ?? 'Unknown section',
+        startTime: entry.startTime,
+      }),
+    );
+
+    // One attendance task per distinct class/section taught today that has no attendance record
+    // yet for today — not per period, since attendance is marked once per class/section per day.
+    const todaySections = [
+      ...new Map(
+        entries.map((e) => [`${e.classId}:${e.sectionId}`, e]),
+      ).values(),
+    ];
+    const sectionsNeedingAttendance = await Promise.all(
+      todaySections.map(async (e) => {
+        const marked = await this.prisma.attendanceRecord.count({
+          where: { classId: e.classId, sectionId: e.sectionId, date: today },
+        });
+        return marked === 0 ? e : null;
+      }),
+    );
+    const attendanceTasks: TeacherDashboardDto['attendanceTasks'] =
+      sectionsNeedingAttendance
+        .filter((e) => e !== null)
+        .map((e) => ({
+          id: `${e.classId}:${e.sectionId}`,
+          label: `Mark attendance — ${classNames.get(e.classId) ?? 'Unknown class'} / ${sectionNames.get(e.sectionId) ?? 'Unknown section'}`,
+          dueLabel: 'Today',
+        }));
+
+    const pendingAssignments: TeacherDashboardDto['pendingAssignments'] =
+      homework.map((hw) => ({
+        id: hw.id,
+        label: hw.title,
+        dueLabel: formatDateOnly(hw.deadline),
+      }));
+
+    const examWhere: Prisma.ExamWhereInput = {
+      date: { gte: today },
+      OR: assignments.map((a) => ({
+        subjectId: a.subjectId,
+        classId: a.classId,
+        sectionId: a.sectionId,
+      })),
+    };
+    const exams =
+      assignments.length > 0
+        ? await this.prisma.exam.findMany({
+            where: examWhere,
+            orderBy: { date: 'asc' },
+            take: 5,
+          })
+        : [];
+    const examClassIds = [...new Set(exams.map((e) => e.classId))];
+    const examSectionIds = [...new Set(exams.map((e) => e.sectionId))];
+    const [examClasses, examSections] = await Promise.all([
+      this.prisma.schoolClass.findMany({
+        where: { id: { in: examClassIds.filter((id) => !classNames.has(id)) } },
+      }),
+      this.prisma.section.findMany({
+        where: {
+          id: { in: examSectionIds.filter((id) => !sectionNames.has(id)) },
+        },
+      }),
+    ]);
+    for (const c of examClasses) classNames.set(c.id, c.name);
+    for (const s of examSections) sectionNames.set(s.id, s.name);
+
+    const upcomingExams: TeacherDashboardDto['upcomingExams'] = exams.map(
+      (exam) => ({
+        id: exam.id,
+        label: `${classNames.get(exam.classId) ?? 'Unknown class'} / ${sectionNames.get(exam.sectionId) ?? 'Unknown section'} exam`,
+        dueLabel: formatDateOnly(exam.date),
+      }),
+    );
+
+    return { todayClasses, attendanceTasks, pendingAssignments, upcomingExams };
   }
 }
 

@@ -313,8 +313,14 @@ export class InvoicesService {
       },
     });
     if (!structure) {
+      // `classAppliedFor` is a raw classId (`AdmissionsService`/the frontend's own `InquiryForm`
+      // resolve it to a name for display everywhere else — see that call site's own comment) —
+      // resolve it here too rather than leaking a UUID into this user-facing error message.
+      const schoolClass = await this.prisma.schoolClass.findUnique({
+        where: { id: admission.classAppliedFor },
+      });
       throw new BadRequestException(
-        `No admission fee structure is configured for class ${admission.classAppliedFor} yet — ` +
+        `No admission fee structure is configured for class ${schoolClass?.name ?? 'Unknown class'} yet — ` +
           'add one under Fee Structures (type: Admission) before moving this application to Fee Payment',
       );
     }

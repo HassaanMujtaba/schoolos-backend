@@ -3,14 +3,18 @@
  * `../implementation-plan.md`'s "Permission catalog" (itself collected verbatim from every
  * `frontend/modules/*.md` doc). Run via `npm run prisma:seed`.
  *
- * Only `super_admin` is granted every permission here. Every other role's actual permission
- * grants are a product decision (which of `students.read`/`students.create`/... does a
- * Receptionist actually get?) that PRD §4 gestures at but doesn't fully enumerate — assign the
- * rest once that's confirmed, rather than guessing a specific matrix into a seed script no one
- * reviewed. Until then, every non-super_admin role exists (so `UserRole` grants are possible
- * for local testing) but starts with zero permissions, which is the fail-closed default.
+ * `super_admin` is granted every permission here, `school_owner` every *non-platform* one (owning
+ * a school implies full control of that school, not a guess the way a Receptionist's or Teacher's
+ * exact permission set would be — see `SCHOOL_OWNER_PERMISSIONS` below). Every other role's actual
+ * permission grants are still a product decision (which of `students.read`/`students.create`/...
+ * does a Receptionist actually get?) that PRD §4 gestures at but doesn't fully enumerate, so they
+ * start with zero — the fail-closed default — rather than a guessed-into-a-seed-script matrix.
+ * Unlike before, "zero and stuck" is no longer the end of the story: `platform/roles.controller.ts`
+ * (Super Admin only, `platform.roles.manage`) now lets a real permission matrix be assigned to
+ * every other role after the fact, without another migration or reseed.
  */
 import { PrismaClient } from '@prisma/client';
+import * as bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
@@ -168,10 +172,118 @@ const PERMISSIONS: string[] = [
   'platform.feature-flags.manage',
   'platform.support.read',
   'platform.audit.read',
+  'platform.roles.manage',
   'ai.query',
   'ai.generate-content',
   'ai.view-analytics',
 ];
+
+// Phase 7.9 (Platform Console) — PRD §53's three fixed tiers. `priceMonthly` in dollars (matches
+// `Invoice.totalAmount`'s own convention); `stripePriceId: null` until a real Stripe account's
+// price ids are configured (`platform/billing-provider.ts`'s own doc comment — `LocalBillingProvider`
+// never reads this field at all).
+const PLANS: Array<{
+  tier: 'STARTER' | 'PROFESSIONAL' | 'ENTERPRISE';
+  name: string;
+  priceMonthly: number;
+  maxBranches: number;
+  maxStudents: number;
+  features: string[];
+}> = [
+  {
+    tier: 'STARTER',
+    name: 'Starter',
+    priceMonthly: 49,
+    maxBranches: 1,
+    maxStudents: 300,
+    features: [
+      'Core academics & attendance',
+      'Fee collection',
+      'Parent portal',
+    ],
+  },
+  {
+    tier: 'PROFESSIONAL',
+    name: 'Professional',
+    priceMonthly: 149,
+    maxBranches: 5,
+    maxStudents: 2000,
+    features: [
+      'Everything in Starter',
+      'Examinations & report cards',
+      'Library, transport & inventory',
+      'HR & payroll',
+    ],
+  },
+  {
+    tier: 'ENTERPRISE',
+    name: 'Enterprise',
+    priceMonthly: 399,
+    maxBranches: 50,
+    maxStudents: 20000,
+    features: [
+      'Everything in Professional',
+      'Hostel management',
+      'Advanced reports & analytics',
+      'Priority support',
+    ],
+  },
+];
+
+// Phase 7.9 — a small, fixed catalog (self-service flag *creation* isn't built this phase,
+// `schema.prisma`'s own `FeatureFlag` doc comment). `hostel_module` is `hostel.md`'s own deferred
+// "not every tenant is a boarding school" gating question (`../implementation-plan.md`'s Phase 7.5
+// notes) — this is that catalog entry, not yet consumed by `hostel/` itself (see this row's own
+// module-doc cross-reference there).
+const FEATURE_FLAGS: Array<{
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+}> = [
+  {
+    key: 'hostel_module',
+    label: 'Hostel management',
+    description:
+      'Shows the Hostel module for boarding schools. Off by default — most tenants are day schools.',
+    enabled: false,
+  },
+  {
+    key: 'ai_assistant',
+    label: 'AI assistant',
+    description:
+      'School Assistant / Teacher Assistant (PRD §34/§35, Phase 7.10 — not built yet).',
+    enabled: false,
+  },
+  {
+    key: 'transport_live_tracking',
+    label: 'Transport live tracking',
+    description:
+      'Live vehicle location on the transport map (module doc: not built either side yet).',
+    enabled: false,
+  },
+  {
+    key: 'communication_realtime',
+    label: 'Realtime messaging',
+    description:
+      'The `/ws` gateway-backed live message/notification delivery in Communication.',
+    enabled: true,
+  },
+];
+
+// Phase 7.9 — a Super Admin has to belong to *some* tenant (`User.tenantId` is required, unchanged
+// by this phase — see `schools.service.ts`'s own comment on why a dedicated housekeeping tenant
+// was the chosen fix rather than making that column nullable across every earlier phase's already-
+// shipped auth code). This tenant deliberately has no `School` row — `SchoolsService`/
+// `PlatformUsersService` both filter on `school: { isNot: null }` specifically so this account
+// never shows up in a schools list or a support user search.
+const PLATFORM_TENANT_SLUG = 'platform-console';
+const SUPER_ADMIN_EMAIL =
+  process.env.SUPER_ADMIN_EMAIL ?? 'super-admin@schoolos.dev';
+// Dev-only default, same spirit as JWT_ACCESS_SECRET's ".env.example" placeholder — set
+// SUPER_ADMIN_PASSWORD for real in every non-local environment.
+const SUPER_ADMIN_PASSWORD =
+  process.env.SUPER_ADMIN_PASSWORD ?? 'dev-only-change-me-super-admin';
 
 async function main() {
   console.log(
@@ -207,10 +319,105 @@ async function main() {
     skipDuplicates: true,
   });
 
+  // `school_owner` gets every permission *except* `platform.*` — those are platform-staff-only by
+  // construction (every `platform/*.controller.ts` route gates purely on the permission string,
+  // with no separate "is this actually platform staff" check), so granting one to a tenant role
+  // would hand every school_owner cross-tenant platform access. `platform/roles.service.ts`
+  // enforces this same rule server-side for any *future* edit through the admin UI — this is just
+  // the seed's own starting point, not the only place it's checked.
+  const schoolOwner = await prisma.role.findUniqueOrThrow({
+    where: { key: 'school_owner' },
+  });
+  const schoolOwnerPermissions = permissionRecords.filter(
+    (permission) => !permission.key.startsWith('platform.'),
+  );
+  await prisma.rolePermission.createMany({
+    data: schoolOwnerPermissions.map((permission) => ({
+      roleId: schoolOwner.id,
+      permissionId: permission.id,
+    })),
+    skipDuplicates: true,
+  });
+
   console.log(
-    'Seed complete. Every non-super_admin role has zero permission grants — see this ' +
-      "file's own header comment for why, and assign the real per-role matrix once product " +
-      'confirms it.',
+    `Seeding ${PLANS.length} plans and ${FEATURE_FLAGS.length} feature flags...`,
+  );
+
+  for (const plan of PLANS) {
+    await prisma.plan.upsert({
+      where: { tier: plan.tier },
+      update: {
+        name: plan.name,
+        priceMonthly: plan.priceMonthly,
+        maxBranches: plan.maxBranches,
+        maxStudents: plan.maxStudents,
+        features: plan.features,
+      },
+      create: plan,
+    });
+  }
+
+  for (const flag of FEATURE_FLAGS) {
+    // Not `upsert` with the `key_tenantId` compound-unique shorthand — Prisma's generated type
+    // for that requires a non-null `tenantId` (Postgres itself treats two NULLs in a unique index
+    // as distinct, so "the" row with `tenantId: null` isn't something a compound-unique lookup can
+    // even express); `findFirst` + create-or-update by id is the correct way to upsert a
+    // nullable-column half of a compound key.
+    const existing = await prisma.featureFlag.findFirst({
+      where: { key: flag.key, tenantId: null },
+    });
+    if (existing) {
+      await prisma.featureFlag.update({
+        where: { id: existing.id },
+        data: { label: flag.label, description: flag.description },
+      });
+    } else {
+      await prisma.featureFlag.create({
+        data: { ...flag, scope: 'PLATFORM', tenantId: null },
+      });
+    }
+  }
+
+  console.log(
+    `Seeding the platform housekeeping tenant + Super Admin account...`,
+  );
+
+  const platformTenant = await prisma.tenant.upsert({
+    where: { slug: PLATFORM_TENANT_SLUG },
+    update: {},
+    create: { name: 'Platform', slug: PLATFORM_TENANT_SLUG, status: 'ACTIVE' },
+  });
+  const superAdminUser = await prisma.user.upsert({
+    where: {
+      tenantId_email: { tenantId: platformTenant.id, email: SUPER_ADMIN_EMAIL },
+    },
+    update: {},
+    create: {
+      tenantId: platformTenant.id,
+      email: SUPER_ADMIN_EMAIL,
+      name: 'Super Admin',
+      passwordHash: bcrypt.hashSync(SUPER_ADMIN_PASSWORD, 12),
+      status: 'ACTIVE',
+    },
+  });
+  await prisma.userRole.upsert({
+    where: {
+      userId_roleId: { userId: superAdminUser.id, roleId: superAdmin.id },
+    },
+    update: {},
+    create: {
+      tenantId: platformTenant.id,
+      userId: superAdminUser.id,
+      roleId: superAdmin.id,
+    },
+  });
+
+  console.log(
+    'Seed complete. school_owner has every non-platform permission; every other non-' +
+      "super_admin role has zero — see this file's own header comment for why, and assign the " +
+      'real per-role matrix via /platform/roles (Super Admin only) once product confirms it. ' +
+      'Log in to /platform as the seeded Super Admin with SUPER_ADMIN_EMAIL/SUPER_ADMIN_PASSWORD ' +
+      '(or the dev defaults above) once this has run.',
   );
 }
 

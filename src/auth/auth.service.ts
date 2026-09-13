@@ -206,6 +206,29 @@ export class AuthService {
     );
   }
 
+  /**
+   * Issues the same kind of one-time token as `forgotPassword`, for a user who can't request one
+   * themselves — `POST /platform/schools`' onboarding flow (Phase 7.9) is the one caller: it
+   * creates a school's first admin as `status: INVITED` with no usable password, and
+   * `forgotPassword`'s own `findAuthCandidatesByIdentifier` lookup only ever resolves an
+   * already-`ACTIVE` account, so it can't be the thing that gets this account its first token.
+   * Same dev-only "log it, don't email it" placeholder, same reasoning (Phase 7.7's notification
+   * worker isn't built).
+   */
+  async issueInviteToken(userId: string): Promise<void> {
+    const token = randomBytes(32).toString('base64url');
+    await this.redis.set(
+      this.resetTokenKey(token),
+      userId,
+      'EX',
+      PASSWORD_RESET_TTL_SECONDS,
+    );
+    this.logger.warn(
+      `[dev-only] Invite issued for user ${userId}. Phase 7.7's notification worker will email ` +
+        `this instead of logging it — token: ${token}`,
+    );
+  }
+
   async resetPassword(token: string, newPassword: string): Promise<void> {
     const userId = await this.redis.get(this.resetTokenKey(token));
     if (!userId) {
@@ -216,7 +239,7 @@ export class AuthService {
     await this.redis.del(this.resetTokenKey(token));
 
     const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
-    await this.users.updatePasswordHash(userId, passwordHash);
+    await this.users.setPasswordAndActivate(userId, passwordHash);
     // A password change invalidates every existing session, including the one that requested
     // the reset — force a fresh login everywhere, the same posture as most consumer auth flows.
     await this.sessions.destroyAllSessions(userId);

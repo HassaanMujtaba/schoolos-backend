@@ -115,7 +115,8 @@ documents.read / documents.upload / documents.delete
 certificates.generate / certificates.read
 reports.read / reports.export
 platform.schools.manage / platform.subscriptions.manage / platform.billing.read /
-platform.feature-flags.manage / platform.support.read / platform.audit.read
+platform.feature-flags.manage / platform.support.read / platform.audit.read /
+platform.roles.manage
 ai.query / ai.generate-content / ai.view-analytics
 ```
 
@@ -1017,14 +1018,52 @@ Admissions, Homework, Transport) to the real `POST /documents/upload` — this m
 long-standing "Open questions" item — is still open, and still frontend work, not blocked on
 anything backend-side.
 
-#### 7.2 — Library
+#### 7.2 — Library ✅ built, backend side confirmed
 
 [`modules/library.md`](../frontend/modules/library.md)
 
+**Status:** every endpoint `api.ts` assumes is built (`src/library/`, five controller/service pairs
+by concern — catalog, members, settings, circulation, reservations — sharing the `library`/
+`library/members`/`library/settings`/`library/reservations` prefixes). Migration
+`20260908183840_library_phase_7_2` applied; `test/library.e2e-spec.ts` (22 tests: catalog CRUD +
+tenant isolation, member creation against a real `Student` row, issue/return with a server-computed
+due date and an actually-overdue fine (backdated `dueAt`, not a real multi-day wait) capped at
+`maxFine`, pay/waive, the reservation FIFO queue surfacing as a copy's `nextReservation` once
+returned, atomic fulfill-issues-and-marks-fulfilled, and the portal's self-service reserve/cancel +
+`studentId=me` loans read) all green against live Postgres/Redis. `npm run verify` green.
+
+**One entity-list correction against what the frontend actually built, same "corrected against the
+real built frontend" discipline every earlier phase's own status note applied:** no separate `Fine`
+model — `api.ts` never has one; a fine is just `Loan.fineAmount`/`.fineStatus`, and
+`GET /library/fines` is `GET /library/loans` filtered to `fineStatus != none`. See
+`schema.prisma`'s own "Library" section header comment.
+
+**Real design decisions this phase had to make that the module doc leaves as open questions,
+flagged rather than guessed silently:**
+
+- **Portal self-service reservations auto-provision a `LibraryMember`** — `createReservationForStudent`
+  never learns its own `LibraryMember.id` (module doc's own note), so `LibraryMembersService.
+findOrCreateForStudent` creates one on first use with the same `maxBooks: 3`/`loanPeriodDays: 14`
+  defaults `MemberForm`'s own form defaults use — there's no other source of truth for a student's
+  lending limits until a librarian sets one explicitly.
+- **One endpoint, two callers, no route-level permission gate** — `POST/GET /library/reservations`
+  and `POST .../cancel` carry no `@RequirePermission`, same `attendance/leave.controller.ts`
+  `POST /leave/student` precedent: a librarian caller (`memberId`) is checked against
+  `library.circulate` in the service, a portal caller (`studentId`) against the same
+  self-or-linked-parent ownership `LeaveService.assertCanActForStudent` already established.
+- **`fulfill` is not one DB transaction across issue-the-copy and mark-the-reservation-fulfilled**
+  — `issueBook` already runs its own `$transaction` for the loan+copy half; a real, flagged limit
+  (see `LibraryReservationsService.fulfill`'s own doc comment), not an oversight.
+
+**Not built this phase, deliberately deferred:** the real `readyAt`/`expiresAt` fields on
+`Reservation` the frontend's own hold-expiry countdown (`lib/reservationExpiry.ts`) is waiting on —
+adding them (plus, ideally, a server-side auto-cancel job for expired holds) is additive, no
+existing shape needs to change when it happens.
+
 - **Module:** `library/`.
-- **Entities:** `Book`, `BookCopy`, `LibraryCategory`, `LibraryShelf`, `LibraryMember`, `Loan`,
-  `Fine`, `Reservation`, `LibrarySettings`.
-- **Endpoints:**
+- **Entities:** `Book`, `BookCopy`, `LibraryCategory`, `LibraryShelf`, `LibraryMember`, `Loan`
+  (carries the fine fields — see correction above), `Reservation`, `LibrarySettings`.
+- **Endpoints (as actually built):**
   ```
   CRUD /library/books, /library/categories, /library/shelves
   CRUD /library/books/:bookId/copies
@@ -1040,14 +1079,13 @@ anything backend-side.
   GET  /library/reservations                 + studentId filter (portal)
   POST /library/reservations                 { bookId, memberId } or { bookId, studentId }
   POST /library/reservations/:id/cancel
-  POST /library/reservations/:id/fulfill      atomic: issues a copy + marks fulfilled
+  POST /library/reservations/:id/fulfill      atomic-per-write: issues a copy + marks fulfilled
   GET  /library/loans?studentId=              'me' idiom
   ```
-- **Integration task:** add the real `readyAt`/`expiresAt` fields to `Reservation` the frontend
-  flags as missing — its own hold-expiry countdown is currently a client-side-only approximation
-  (`lib/reservationExpiry.ts`) specifically because this field doesn't exist yet; adding it lets
-  that whole client workaround be deleted in favor of a pure function over a real timestamp, ideally
-  alongside a server-side auto-cancel job for expired holds.
+- **Integration task:** run `frontend`'s existing library component/hook tests against this real
+  backend locally (not just their own mocks) — every contract question this phase had is resolved
+  above, so what's left is verification, not design. Add the real `readyAt`/`expiresAt` fields (see
+  "Not built" above) whenever hold-expiry is prioritized.
 
 #### 7.3 — Transport (vehicle/route management; live tracking is its own sub-phase)
 
@@ -1067,140 +1105,431 @@ anything backend-side.
 - **Integration task:** add a batch student-lookup-by-ids endpoint if route detail's "Students" tab
   needs resolved names instead of just a count (flagged as a nice-to-have, not required).
 
-#### 7.4 — Inventory & Assets
+#### 7.4 — Inventory & Assets ✅ built, backend side confirmed
 
 [`modules/inventory.md`](../frontend/modules/inventory.md)
 
-- **Module:** `inventory/`.
-- **Entities:** `StockCategory`, `StockItem`, `StockMovement`, `Asset`, `AssetMaintenanceRecord`.
-- **Endpoints:**
-  ```
-  CRUD /inventory/stock-categories
-  CRUD /inventory/stock                 quantity is read-only here — see below
-  POST /inventory/stock/:id/movements    the only way quantity changes (issue/restock/adjustment) —
-                                        matches frontend's StockAdjustmentDialog-only mutation path
-  CRUD /assets
-  ```
+**Status:** `inventory/` built (`src/inventory/stock/`, `src/inventory/assets/` — split by concern,
+same convention `TransportModule`'s `vehicles/`/`routes/` already set), migration
+`20260909164751_phase7_4_inventory_assets` applied, e2e-tested against a live Postgres/Redis
+(`test/inventory.e2e-spec.ts`: 26 tests — stock category add/delete, stock item CRUD with a
+server-ignored `quantity` on update, the movement log applying a signed delta and rejecting both a
+below-zero result and a zero-quantity movement, asset CRUD with wholesale-replaced maintenance
+records and the disposed-without-a-disposal-date 400, and tenant/permission isolation for both
+`inventory.*` and `assets.*` — they're separate permission pairs, so a caller with only one set is
+exercised against the other's routes too). `npm run verify` green; the full e2e suite is green
+except one **pre-existing, unrelated** failure in `academics.e2e-spec.ts` ("analytics groups by
+class") — that spec hardcodes attendance on `2026-09-07`/`08` and asserts a `scope: daily` (i.e.
+today) query sees it, which drifts false once the real calendar date moves past those — a Phase 4
+test-data bug, not touched by this phase and not fixed here (out of scope). A real `nest build` +
+`node dist/main` boot was curl-verified (401 with the standard error shape on both new route
+groups with no token, `/docs` 200, every route logged at startup).
 
-#### 7.5 — Hostel
+**A real bug in this plan's own original draft, caught before it shipped:** the entity list above
+implied `Asset.status` would be a Prisma enum like every other status field in this schema
+(`ASSET_STATUSES` in `frontend/schemas.ts` reads exactly like an enum candidate). It isn't one:
+those literals are hyphenated (`"in-use"`, `"in-storage"`, `"under-maintenance"`, `"disposed"`),
+and Prisma enum _member names_ can't contain a hyphen. The first pass used `@map` on each enum
+value to translate — which turned out to only rename the **database** representation, not the
+value Prisma Client actually reads/writes in TypeScript (the generated client's `AssetStatus.in_use`
+evaluates to `"in_use"`, not `"in-use"`), so `@IsEnum`/every response would have round-tripped the
+wrong string and silently broken the frontend contract. Caught before the migration shipped (a
+local `prisma migrate reset`, user-confirmed, no real data at stake — same discipline as Phase 6's
+own caught-before-it-shipped constraint fix); `Asset.status` is a plain `String` column instead,
+validated at the application layer (`ASSET_STATUSES`/`@IsIn` in `assets/dto/asset.dto.ts`), same
+"peer entity, no DB-level constraint" trade-off `Book.categoryId`/`.shelfId` already make. Worth
+flagging generally: `@map` on a Prisma enum value is a database-rename tool, not a wire-format
+translation layer — don't reach for it to bridge a frontend contract with hyphens or other
+enum-illegal characters in its literals.
+
+**Module:** `inventory/` (`stock/`, `assets/`).
+
+**Entities:** `StockCategory`, `StockItem`, `StockMovement`, `Asset` (`status` a validated plain
+string, not a Prisma enum — see the bug note above), `AssetMaintenanceRecord`.
+
+**Endpoints (as actually built):**
+
+```
+GET/POST      /inventory/stock-categories     add/delete-only reference list, no update endpoint —
+                                              matches api.ts exactly, same shape as
+                                              LibraryCatalogService's categories/shelves
+DELETE        /inventory/stock-categories/:id
+CRUD          /inventory/stock                ?categoryId=&search= filter; quantity accepted on
+                                              create but ignored on update — inventory.manage
+GET           /inventory/stock/:id/movements  most-recent-first
+POST          /inventory/stock/:id/movements  the only way quantity changes — applies the
+                                              (already-signed) quantityChange to StockItem.quantity
+                                              in the same transaction that logs it; 400s a movement
+                                              that would take stock negative or a zero-quantity one
+CRUD          /assets                         top-level prefix, not /inventory/assets — matches
+                                              api.ts exactly; maintenanceRecords replaced wholesale
+                                              on every write; assets.manage
+```
+
+**Integration task:** run `frontend`'s existing inventory component/hook tests against this real
+backend locally (not just their own mocks) — every contract question this phase had (the
+quantity-is-log-only rule, the disposal-date business rule, the `AssetStatus` hyphen fix above) is
+resolved above, so, like every other confirmed phase, what's left is verification, not design.
+
+#### 7.5 — Hostel ✅ built, backend side confirmed
 
 [`modules/hostel.md`](../frontend/modules/hostel.md)
 
-- **Module:** `hostel/`.
-- **Entities:** `Hostel`, `Room` (with `floorLabel` as a plain field — no separate Floor entity,
-  matching the frontend's collapsed `hostel → room → bed` hierarchy), `Allocation`, `Visitor`,
-  `Complaint`. **No `Bed` entity** — a room's `capacity` is its bed count; occupancy is derived from
-  active allocations server-side (`GET /hostel/rooms/:id/occupancy`), matching
-  `lib/occupancy.ts`'s frontend logic exactly so the two never disagree about which beds are free.
-- **Endpoints:**
-  ```
-  CRUD /hostel/hostels
-  CRUD /hostel/rooms
-  GET  /hostel/rooms/available?hostelId=
-  GET  /hostel/rooms/:id/occupancy
-  GET  /hostel/allocations
-  POST /hostel/allocate
-  PATCH /hostel/allocations/:id/reassign
-  POST /hostel/allocations/:id/vacate
-  GET/POST /hostel/visitors
-  POST /hostel/visitors/:id/check-out
-  CRUD /hostel/complaints
-  ```
-- **Integration task:** decide hostel fee linkage with `fees/` (a fee type/structure reference vs.
-  a separate billing flow) — unresolved on both sides, needs a joint decision before either side
-  builds it. Also confirm with product whether hostel features should be gated behind a
-  school-level feature flag (not every tenant is a boarding school) — if yes, that's a
-  `platform/feature-flags` catalog entry, not a hostel-module change.
+**Status:** `hostel/` built — four controller/service pairs by concern, same split-by-concern
+convention `LibraryModule` already set: `hostel-structure` (hostels + rooms + `available` +
+`occupancy`), `hostel-allocations`, `hostel-visitors`, `hostel-complaints`. Migration
+`20260909171152_phase7_5_hostel` applied, e2e-tested against a live Postgres/Redis
+(`test/hostel.e2e-spec.ts`: 42 tests — hostel/room CRUD with the room-delete-blocked-while-occupied
+and hostel-delete-blocked-while-rooms-exist guards, `available`/`occupancy` server-computed reads,
+the allocate → reassign → vacate lifecycle (bed-range, bed-clash, and already-resident/
+already-vacated guards, plus re-allocating a freed student), visitor check-in/out, complaint create
+(with/without a room or resident) + status resolution, and tenant/permission isolation —
+`hostel.allocate` is exercised as a separate permission from `hostel.manage`). `npm run verify`
+green; the full e2e suite is green except the one **pre-existing, unrelated** `academics.e2e-spec.ts`
+date-bomb failure Phase 7.4's own status note already flagged (not touched here). A real
+`nest build` + `node dist/main` boot was curl-verified (401 on both new route groups with no token,
+every route logged at startup).
 
-#### 7.6 — HR & Payroll
+**A design decision this phase had to make that the module doc leaves as an open question, flagged
+rather than guessed silently:** a student allocated to a bed can't be allocated to a second bed
+elsewhere at the same time — `POST /hostel/allocate` 409s if the student already holds an active
+allocation, matching this module doc's own resolved call that a same-room bed swap isn't supported
+either ("use vacate + re-allocate for that rarer case"). Neither module doc nor the PRD states this
+explicitly, but two simultaneous beds for one resident isn't a real state a hostel roster should
+ever show — see `HostelAllocationsService.assertStudentNotAlreadyResident`'s own doc comment.
+
+**A second lesson from Phase 7.4's `AssetStatus` bug, applied proactively here:** `Complaint.status`
+(`schemas.ts`'s `COMPLAINT_STATUSES` includes `"in-progress"`, hyphenated) is a plain `String`
+column with `@IsIn` validation, not a Prisma enum — same reasoning as `Asset.status`, caught before
+writing the schema this time instead of after. `AllocationStatus`/`HostelType`/`RoomType`/
+`ComplaintCategory` have no hyphens in their frontend literals, so those stayed real Prisma enums.
+
+**Two real data-modeling calls, both flagged rather than guessed:**
+
+- **`Allocation.studentLabel` is never client-supplied**, resolved live from the real `Student` row
+  every time — `api.ts`'s `createAllocation` payload deliberately drops
+  `AllocationFormValues.studentLabel` before the request goes out, so there's nothing to trust even
+  if it wanted to. **`Visitor.residentLabel`/`Complaint.residentLabel` are the opposite** — `api.ts`'s
+  `checkInVisitor`/`createComplaint` genuinely forward the form's `residentLabel` as-is, so those
+  are stored as client-supplied denormalized snapshots (same trade-off `LibraryMember.personLabel`
+  already makes), while `residentStudentId` is still validated against a real `Student` row.
+- **`Allocation.allocatedAt`/`.vacatedAt` are date-only** (`@db.Date`, matching this schema's own
+  `Loan.issuedAt`/`.returnedAt` precedent for a "since when" resident-facing date), while
+  **`Visitor.checkInAt`/`.checkOutAt` and `Complaint.createdAt`/`.resolvedAt` are full timestamps**
+  — a visitor log and a complaint's audit trail record the actual time, not just the day.
+
+**Not built this phase, per the module doc's own explicitly deferred scope:** hostel-specific
+attendance (needs its own marking UI, treated as its own sub-phase); a self-service portal view
+(hostel isn't in the Portals table). **Hostel fee linkage stays unresolved on both sides** — no
+frontend wiring exists for it (`hostel.md`'s own open question), so nothing was built here either;
+still needs a joint decision with `fees/` before either side scopes it. **The school-level
+feature-flag gating question** (not every tenant is a boarding school) also stays open — a
+`platform/feature-flags` catalog entry for Phase 7.9, not a `hostel/` module change.
+
+**Module:** `hostel/` (`hostel-structure`, `hostel-allocations`, `hostel-visitors`,
+`hostel-complaints`).
+
+**Entities:** `Hostel`, `Room` (`floorLabel` a plain field, no separate Floor entity — matches the
+frontend's collapsed `hostel → room → bed` hierarchy), `Allocation` (`status` a real Prisma enum),
+`Visitor`, `Complaint` (`status` a validated plain string, not a Prisma enum — see the bug-avoidance
+note above). **No `Bed` entity** — a room's `capacity` is its bed count; occupancy is derived from
+active allocations server-side (`GET /hostel/rooms/:id/occupancy`), matching `lib/occupancy.ts`'s
+frontend logic exactly so the two never disagree about which beds are free.
+
+**Endpoints (as actually built):**
+
+```
+CRUD /hostel/hostels                  hostel.manage gates mutations; delete 409s while rooms exist
+CRUD /hostel/rooms                    ?hostelId=&search=; delete 409s while an active resident
+                                      remains; occupiedBeds always server-computed
+GET  /hostel/rooms/available?hostelId= rooms with at least one free bed, not paginated
+GET  /hostel/rooms/:id/occupancy      AllocationDesk's bed grid
+GET  /hostel/allocations              ?hostelId=&status=
+POST /hostel/allocate                 hostel.allocate; 400s an out-of-range bed or missing student,
+                                      409s an already-occupied bed or an already-resident student
+PATCH /hostel/allocations/:id/reassign hostel.allocate; same bed-range/bed-clash checks as allocate
+POST /hostel/allocations/:id/vacate   hostel.allocate; 409s an already-vacated allocation
+GET/POST /hostel/visitors             ?open=true|false (string, not a real boolean query param)
+POST /hostel/visitors/:id/check-out   409s an already-checked-out visitor
+CRUD /hostel/complaints (no DELETE)   PATCH takes { status, resolutionNotes }; resolvedAt tracks
+                                      the current resolved state, not a one-way flag
+```
+
+**Integration task:** run `frontend`'s existing hostel component/hook tests against this real
+backend locally (not just their own mocks) — every contract question this phase had (the
+already-resident guard, the `Complaint.status` hyphen avoidance, the client-supplied-vs-resolved
+label split) is resolved above, so, like every other confirmed phase, what's left is verification,
+not design. The fee-linkage and feature-flag-gating questions remain genuinely open — flag them for
+a joint product conversation, don't guess at either from the backend side alone.
+
+#### 7.6 — HR & Payroll ✅ built, backend side confirmed
 
 [`modules/hr-payroll.md`](../frontend/modules/hr-payroll.md)
 
-- **Modules:** `hr/`, `payroll/`.
-- **Entities:** `Employee`, `EmployeeLifecycleEvent` (transfer/resignation/termination),
-  `LeaveBalance`, `LeaveRequest` (employee), `SalaryStructure`, `PayrollPeriod`, `Payslip`.
-- **Endpoints:**
+**Status:** `hr/` and `payroll/` built as two Nest modules (matching the module doc's own
+two-folder split), five controller/service pairs by concern: `employees`/`employee-leave` in
+`hr/`, `salary-structures`/`payroll-periods`/`payslips` in `payroll/` — `PayrollModule` imports
+`HrModule` directly for the employee-existence/name/designation lookups a salary structure or
+payslip needs, same `FeesModule`→`AdmissionsModule` cross-module pattern Phase 6/3 already set.
+Migration `20260909175300_phase7_6_hr_payroll` applied, e2e-tested against a live Postgres/Redis
+(`test/hr-payroll.e2e-spec.ts`: 30 tests — employee CRUD with the `employeeId`-uniqueness conflict,
+the transfer/resignation/termination lifecycle with its terminal-state guard, employee leave
+submit → approval-queue → approve with the `employeeId=me` idiom and its real `LeaveBalance.used`
+increment, salary-structure upsert, the payroll period `draft → generated → approved` state
+machine including a real PRD §20 absence-deduction input, the payslip publish gate
+(`employeeId=me` only ever sees `approved` periods), and tenant/permission isolation). `npm run
+verify` green; the full e2e suite is green except the one **pre-existing, unrelated**
+`academics.e2e-spec.ts` date-bomb failure Phase 7.4's own status note already flagged (not touched
+here).
+
+**This phase's own resolved integration task — the teacher↔employee linkage:** the module doc
+flagged `TeacherLeaveTab`'s `Employee.id === Teacher.id` assumption as unconfirmed. That equality
+can't be made true in general (the two rows are independently created with independently
+generated uuids), so the real link built here is `Employee.teacherId` — an explicit, optional,
+`@unique` FK to `Teacher.id`, set at employee creation for staff who are also teachers. **This is a
+genuine, flagged frontend follow-up, not fully closed by this phase alone:**
+`frontend/src/features/teachers/components/TeacherProfile.tsx`'s `TeacherLeaveTab` still passes
+`teacher.id` straight through as `employeeId`, which now resolves nothing — that call site needs a
+small change (e.g. a `GET /hr/employees?teacherId=` lookup, not built this phase since nothing in
+the assumed contract calls for it yet) to resolve the linked employee id instead. See
+`Employee.teacherId`'s own schema doc comment for the fuller reasoning.
+
+**A second data-modeling call worth flagging:** `Employee.employeeId` (the org's human-readable
+staff code, e.g. "EMP-001") is a completely different thing from this row's own `id` primary key
+and from `Employee.teacherId` above — same three-different-identifiers shape `Teacher.id`/
+`Teacher.employeeId`/`Teacher.userId` already has. Every `employeeId` path/query param across this
+contract (`/payroll/salary-structures/:employeeId`, `?employeeId=me`, etc.) means the row's real
+`id`, never the human code — worth restating explicitly since the field name overlap invites
+confusion.
+
+- **Modules:** `hr/` (`employees`, `employee-leave`), `payroll/` (`salary-structures`,
+  `payroll-periods`, `payslips`).
+- **Entities:** `Employee` (`teacherId`/`userId` both nullable `@unique`, see above),
+  `EmployeeLifecycleEvent` (transfer/resignation/termination, append-only), `EmployeeLeaveRequest`
+  (own model/table, never sharing rows with student `LeaveRequest`), `LeaveBalance` (one row per
+  `(employee, leaveType)`, seeded with fixed default allotments at employee creation),
+  `SalaryStructure` (one row per employee), `PayrollPeriod` (`draft → generated → approved`),
+  `Payslip` (one row per `(period, employee)`, never edited after generation — a correction re-runs
+  a new period).
+- **Endpoints (as actually built):**
   ```
-  GET/POST/PATCH /hr/employees          no DELETE — status changes via lifecycle actions only
-  POST /hr/transfers
-  POST /hr/resignations
-  POST /hr/terminations
-  GET/POST /leave/employee               employeeId accepts 'me'
-  PATCH /leave/employee/:id
-  GET  /leave/employee/balances
-  GET/PUT /payroll/salary-structures/:employeeId
-  GET/POST /payroll/periods
-  POST /payroll/periods/:id/run          draft → generated
-  POST /payroll/periods/:id/approve      generated → approved
-  GET  /payroll/payslips                 filterable by periodId or employeeId=me
-  GET  /payroll/payslips/:id
+  GET/POST/PATCH /hr/employees          hr.read / hr.manage; no DELETE — status changes only via
+                                         the three lifecycle actions below
+  POST /hr/transfers                    hr.manage; requires newDepartment/newDesignation
+  POST /hr/resignations                 hr.manage; 409s once resigned/terminated (terminal state)
+  POST /hr/terminations                 hr.manage; same terminal-state guard
+  GET/POST /leave/employee              no route-level gate (self-service); employeeId=me idiom;
+                                         POST always resolves to the caller's own linked Employee
+  PATCH /leave/employee/:id             leave.approve; 409s an already-reviewed request; approving
+                                         increments the matching LeaveBalance.used
+  GET  /leave/employee/balances         employeeId=me idiom; always returns all four leave types
+  GET/PUT /payroll/salary-structures/:employeeId   payroll.read (GET) / payroll.run (PUT); GET
+                                         returns an empty 200 body (not literal JSON null) when
+                                         unset — see the controller's own doc comment
+  GET/POST /payroll/periods             payroll.read (GET) / payroll.run (POST)
+  POST /payroll/periods/:id/run         payroll.run; draft → generated; 409s outside draft
+  POST /payroll/periods/:id/approve     payroll.approve; generated → approved; 409s outside generated
+  GET  /payroll/payslips                no route-level gate; filterable by periodId or
+                                         employeeId=me; an employeeId filter always restricts to
+                                         approved periods (the publish gate), a bare periodId shows
+                                         every status
+  GET  /payroll/payslips/:id            no route-level gate
   ```
-- **Payroll math (PRD §20's formula) is computed entirely server-side** — the frontend only
-  displays the breakdown, per its own resolved assumption; implement the formula here, don't let it
-  drift into the frontend as a "just for preview" shortcut the way library's fine-rate preview
-  originally did.
-- **Integration task:** define the real teacher↔employee linkage (frontend currently assumes
-  `Employee.id === Teacher.id`, flagged explicitly as unconfirmed) — this blocks
-  `TeacherLeaveTab`'s reuse of `EmployeeLeaveSummary` from being correct for any school where that
-  assumption doesn't hold.
+- **Payroll math (PRD §20's formula) is computed entirely server-side** (`payroll-calc.ts`) — the
+  frontend only displays the breakdown, per its own resolved assumption. **A real, flagged limit,
+  not a bug:** `overtime`/`bonus` are always `0` — nothing in this contract's built scope captures a
+  per-period overtime-hours or bonus-amount input yet (`SalaryStructureForm`'s fixed inputs don't
+  extend that far, module doc "Simplifications made to fit this doc's own scope"). `absenceDeduction`
+  **is** real, computed at `run` time from approved `unpaid` `EmployeeLeaveRequest` days overlapping
+  the period, at a flat `basicSalary / 30` daily rate — the one place this phase went beyond the
+  fixed-input-only math the module doc originally scoped, since the PRD's own formula names
+  "Absence" as a real line item and the data to compute it honestly (approved unpaid leave) already
+  exists from the HR half of this same phase.
+
+**Not built this phase, per the module doc's own explicitly deferred scope:** recruitment/ATS;
+contracts/document upload (waits on `documents-certificates.md`'s real upload endpoint); a holiday
+calendar reference on the leave summary. Leave types stay a fixed four-value enum and department/
+designation stay free text, matching the module doc's own simplification call.
+
+**Integration task:** run `frontend`'s existing hr/payroll component/hook tests against this real
+backend locally, and land the `TeacherProfile.tsx` follow-up above — every other contract question
+this phase had (the `employeeId=me` idiom, the payroll period state machine, the null-body nuance
+on an unset salary structure) is resolved above, so what's left is verification plus that one
+frontend change, not further backend design.
 
 #### 7.7 — Communication
 
 [`modules/communication.md`](../frontend/modules/communication.md)
 
-- **Module:** `communication/` (notifications, messages, announcements, events, PTM),
-  `notifications/` (delivery engine, PRD §36 — push/email/SMS/WhatsApp providers + templates +
-  retry/fallback, a background-worker concern, not this module's REST surface).
-- **Entities:** `Notification`, `NotificationPreference`, `MessageThread`, `Message`,
-  `Announcement`, `Event` (with `isExternal` holiday/exam mirrors sourced from `school-setup`/
-  `examinations`, not owned here), `PtmSlot`, `PtmBooking` (one entity — frontend already merged
-  these).
-- **Endpoints:**
+- **Modules:** `communication/` — five controller/service pairs by sub-area (notifications,
+  messages, announcements, events, ptm) plus `communication/realtime/` (the `/ws` gateway). §36's
+  actual push/email/SMS/WhatsApp delivery engine is **not** built here, per the module doc's own
+  "never the delivery infrastructure" note — left as a background-worker follow-up.
+- **Entities:** `Notification`, `NotificationPreference` (one row per `(user, type)`, unset types
+  default to `[inApp]` at read time), `MessageThread`/`MessageParticipant`/`Message` (real
+  per-user membership + read-state, not just a `participantLabels` string array), `Announcement`,
+  `Event` (manually-created rows only — `holiday`/`exam` `isExternal` entries are synthesized at
+  read time from `Holiday`/`Exam`, never written here), `PtmSlot` (a slot and its booking are the
+  same row, per the module doc).
+- **Endpoints (as actually built):**
   ```
-  GET  /notifications
-  GET  /notifications/unread-count
-  PATCH /notifications/:id/read
-  PATCH /notifications/read-all
-  GET/PUT /notifications/preferences
-  GET  /messages/threads
-  GET  /messages/threads/:id
-  POST /messages/threads
-  POST /messages/threads/:id/messages
-  PATCH /messages/threads/:id/read
-  CRUD /announcements
-  CRUD /events                            isExternal entries read-only from this module's own CRUD
-  GET  /ptm/availability
-  POST /ptm/slots
-  DELETE /ptm/slots/:id
-  POST /ptm/book
-  GET  /ptm/bookings/mine
-  POST /ptm/bookings/:id/cancel
-  PATCH /ptm/bookings/:id
+  GET  /notifications                   self-service, no gate; filterable by type/unreadOnly
+  GET  /notifications/unread-count      self-service, no gate
+  GET/PUT /notifications/preferences    self-service, no gate; PUT is a full replace, not a
+                                         per-type patch (NotificationPreference's compound unique
+                                         key includes tenantId, same upsert friction LeaveBalance's
+                                         own key has — sidestepped with delete-then-recreate)
+  PATCH /notifications/:id/read         self-service, no gate
+  PATCH /notifications/read-all         self-service, no gate
+  GET/POST /messages/threads            self-service (no gate) / messages.send
+  GET  /messages/threads/:id            self-service; 404s a non-participant
+  POST /messages/threads/:id/messages   self-service, no gate — any participant can reply
+  PATCH /messages/threads/:id/read      self-service, no gate
+  GET/POST/PATCH/DELETE /announcements  announcements.read (GET) / announcements.create (write) —
+                                         router.tsx's own comment: "announcements carries the
+                                         module doc's explicit announcements.read string"
+  GET  /events                          no gate — "common information everyone reads"; merges this
+                                         module's own rows with isExternal Holiday/Exam mirrors
+  POST/PATCH/DELETE /events             events.manage; a synthetic isExternal id (e.g.
+                                         `holiday-<id>`) simply 404s on PATCH/DELETE — never a real
+                                         Event row, no special-casing needed
+  GET  /ptm/availability                no gate — read by both the teacher-manage and parent-book
+                                         flows; teacherId accepts a real Teacher.id or 'me'
+  POST/DELETE /ptm/slots(/:id)          ptm.manage; always the caller's own teacherId=me record
+  POST /ptm/book                        ptm.book; studentId supports 'me' (Student booking self) or
+                                         a Parent's linked child (ParentStudentLink-checked)
+  GET  /ptm/bookings/mine               self-service, no gate; scoped to bookedByUserId === caller
+  POST /ptm/bookings/:id/cancel         self-service, no gate; caller must be the booker or the
+                                         slot's own teacher
+  PATCH /ptm/bookings/:id               ptm.manage; caller must be the slot's own teacher
   ```
-- **This is where the `/ws` Socket.IO gateway finally gets built** — every earlier phase deferred
-  realtime delivery to "after REST flows are proven"; this module is the first one where realtime
-  is the actual point (notification delivery, live unread counts). Build REST first anyway
-  (frontend already polls every 30s and will keep working once the gateway lands), then add the
-  gateway and swap polling for push on the frontend side as a follow-up, not a blocking dependency.
+- **The `/ws` Socket.IO gateway is built this phase**, per this section's original call — a
+  `CommunicationGateway` (namespace `/ws`) authenticated off the same access token as the HTTP
+  side (verified from the handshake's `auth.token`/`?token=`, not a header — WS handshakes carry
+  neither the `Authorization` header nor the httpOnly refresh cookie), joining every socket to its
+  own `user:<userId>` room. `RealtimeService` is the one thing `NotificationsService`/
+  `MessagesService`/`PtmService` call to push a live event (`notification:new`, `message:new`) —
+  fire-and-forget, REST stays the source of truth, a missed emit is never a correctness bug. The
+  frontend's own polling (unread count every 30s) still works unchanged; wiring an actual `/ws`
+  client there is the follow-up the module doc's own checklist already flagged as open.
+- **A real, flagged gap, not a bug:** `PtmSlotManager.tsx` (the teacher's own slot-management view)
+  reads `GET /ptm/availability?teacherId=` with `session.user.id` (a `User.id`) rather than the
+  real `Teacher.id` or the `'me'` idiom every other `teacherId`/`studentId`/`employeeId` query
+  param in this API supports — `PtmBookingFlow.tsx`'s own `teacherId` (from `useTeachersQuery`) is
+  the real id, so this is a one-component frontend bug, not a contract mismatch; fix is to pass
+  `'me'` instead, same as this doc's own Phase 7.6 `TeacherProfile.tsx` follow-up.
 - **Integration task:** the two component-level interactive tests the frontend's own checklist
-  still has open (send/receive a thread end to end, book a PTM slot end to end) are a good shape
-  for the first real e2e tests run against this live backend, not just frontend-mocked ones.
+  still had open (send/receive a thread end to end, book a PTM slot end to end) are now covered by
+  `test/communication.e2e-spec.ts` against this real backend — run `frontend`'s existing
+  communication component/hook tests against it too, and land the `PtmSlotManager.tsx`
+  `teacherId=me` fix above.
 
-#### 7.8 — Reports & Analytics
+#### 7.8 — Reports & Analytics ✅ built, backend side confirmed
 
 [`modules/reports-analytics.md`](../frontend/modules/reports-analytics.md)
 
-- **Module:** `reports/` — mostly read/aggregation over data every other module already owns; build
-  this _after_ the modules it aggregates (fees, attendance, exams, admissions), not before.
-- **Endpoints:**
+**Status:** every endpoint `api.ts` assumes is built (`src/reports/`, one controller/service pair —
+this module never grew the five-file-per-concern shape earlier phases needed, since it's read/
+aggregation only, nothing to CRUD). **No Prisma migration this phase** — a real, deliberate first
+for this plan's phase table: `reports/` persists nothing of its own, it only reads
+`AttendanceRecord`/`ExamMark`/`Invoice`/`Payment`/`Payslip`/`AdmissionApplication`/`Student`/
+`Teacher` rows every earlier phase's migration already created. `test/reports.e2e-spec.ts` (14
+tests) green against live Postgres/Redis; `npm run verify`'s typecheck/lint/format/secretlint/unit
+legs all green (see "Not run clean" below for the one pre-existing exception, unrelated to this
+phase). Unlike every earlier phase's own e2e spec, this one seeds its `AttendanceRecord`/`Exam`/
+`ExamMark`/`Invoice`/`Payment`/`PayrollPeriod`/`Payslip`/`AdmissionApplication` fixtures directly
+via Prisma rather than replaying each owning module's own API — those write flows are already
+covered by their own specs; this one verifies the aggregation math, the `reports.read`/
+`reports.export` gates, tenant isolation, and the export endpoint's actual binary responses
+(real `%PDF-` bytes, a real `PK`-signed xlsx zip, CSV text containing the real computed numbers).
+
+- **Module:** `reports/` — one `ReportsController`/`ReportsService` pair, `ReportsModule` imports
+  `FeesModule` directly for `InvoicesService.getOutstanding` (same cross-module-reuse pattern
+  `AdmissionsModule`→`FeesModule` and `PayrollModule`→`HrModule` already established) rather than
+  re-deriving outstanding-balance math a third way.
+- **Entities:** none new — see "No Prisma migration" above.
+- **Endpoints (as actually built):**
   ```
-  GET /reports/principal-dashboard
-  GET /reports/academic?classId=&subjectId=
-  GET /reports/financial?from=&to=
-  GET /reports/:id/export?format=pdf|excel|csv
+  GET /reports/principal-dashboard         reports.read
+  GET /reports/academic?classId=&subjectId= reports.read
+  GET /reports/financial?from=&to=          reports.read
+  GET /reports/:id/export?format=pdf|excel|csv  reports.export; :id one of the three routes above
   ```
-- PDF/Excel export is entirely server-generated (the frontend only triggers a blob download) —
-  budget real time for report-template/export-formatting work here, it's not a thin pass-through.
+- **PDF/Excel export is real, generated server-side, not a thin pass-through** — `pdf-lib`
+  (already a dependency, `certificates/pdf/certificate-pdf.ts`'s own library) renders a paginating
+  letterhead-style PDF (`src/reports/pdf/report-pdf.ts` — the first PDF in this codebase that
+  actually spans more than one page); a new dependency, `exceljs` (added this phase — see
+  "Dependency added" below), renders a real multi-sheet `.xlsx` workbook
+  (`src/reports/excel/report-excel.ts`); CSV is a flat text render
+  (`src/reports/export/report-csv.ts`). All three consume one shared intermediate shape
+  (`src/reports/export/report-export-model.ts`'s `ReportExportModel` — pure, unit-testable
+  build\* functions, same "business logic that happens to render, not fetch" split
+  `examinations/grading-scale.ts` already uses) instead of three renderers each re-deriving their
+  own layout from the raw report DTOs.
+
+**Real design decisions this phase had to make that the module doc leaves as open questions,
+flagged rather than guessed silently — the full reasoning lives in `ReportsService`'s own header
+comment, summarized here:**
+
+- **"Current term" scoping, with a documented fallback.** The principal dashboard's attendance/
+  fees-collected/admissions/academic-performance figures are scoped to "the term running right
+  now" (`Term.startDate <= today <= endDate`), falling back to a trailing 90-day window when no
+  term is configured — the exact fallback `attendance.service.ts`'s own `'term'` analytics scope
+  already uses, duplicated here rather than shared (same small-per-module-helper convention
+  `csvEscape` already repeats twice). `outstandingFees` is the one dashboard figure deliberately
+  **not** term-scoped — "outstanding" is inherently a right-now snapshot, matching the Fees
+  module's own outstanding-balances view (no date filter there either), and is literally
+  `InvoicesService.getOutstanding()`'s own number, not a second copy of it.
+- **No `Expense`/accounting entity exists** (`Invoice`'s own schema.prisma header comment: "§19
+  accounting ... not built here" — confirmed still true this phase). `totalExpenses` (financial
+  report) is `Payslip.netPay` summed over **approved** payroll periods overlapping the requested
+  range — the only real "money out" this schema tracks; a draft/generated-but-unapproved period's
+  payslips are excluded (not yet a committed expense).
+- **`collectionRatePct`/`outstandingTotal` are billing-anchored (`Invoice.dueDate` in range),
+  `totalRevenue` is cash-anchored (`Payment.paidAt` in range)** — two different questions a
+  financial report legitimately asks ("of what was billed this period, how much is collected/
+  owed" vs. "how much cash actually moved"). A payment landing just outside the window against an
+  invoice due inside it (or the reverse) is real, intentional skew between the two, not a bug.
+- **Academic report only reads `Exam.isPublished` marks** — same visibility rule
+  `report-cards.controller.ts`'s own student/parent gate already enforces; an entered-but-
+  unpublished mark moves nothing here.
+- **`teacherPerformance` attribution goes through `TeacherAssignment`** (subject+class+section) —
+  a mark whose exam's (subjectId, classId, sectionId) has no matching assignment row contributes
+  to every other table but is silently excluded from this one (no invented "Unassigned" row).
+- **`academicPerformancePct` (dashboard headline) is a mean score percentage, not a pass rate** —
+  `overallPassRatePct` (academic report) already owns the pass-rate framing.
+- **CSV/Excel formula-injection guard added** (OWASP "CSV Injection", not called out by the module
+  doc): `className`/`subjectName`/`teacherName` in the exported tables are free text entered
+  through other modules' own CRUD forms, so a value starting with `=`/`+`/`-`/`@` gets a leading
+  `'` prefix (`report-export-model.ts`'s `sanitizeSpreadsheetCell`, applied by the CSV/Excel
+  renderers only — `report-pdf.ts` draws plain text, nothing to neutralize there) before it can
+  execute as a formula the moment a principal opens the file in Excel/Sheets. Caught during this
+  phase's own `security-standards` pass, not present anywhere else in this codebase's two other
+  CSV exporters (`students.service.ts`, `attendance.service.ts`) either — worth backporting there
+  if this is ever revisited.
+
+**Dependency added:** `exceljs@^4.4.0` (real `.xlsx` generation — nothing already in
+`package.json` produces a spreadsheet file). `npm audit` shows it pulls one moderate CVE
+(`uuid < 11.1.1`'s missing buffer-bounds-check advisory) via its own transitive `uuid` — verified
+low real risk here: exceljs only uses `uuid` for internal calc-chain ids, this codebase never
+passes a caller-supplied buffer through it. Confirmed via `git stash` that the pipeline's
+pre-existing 9 high-severity findings (the `multer`/`@nestjs/*` chain, `npm audit fix --force`
+territory) predate this phase entirely — `exceljs` added zero high-severity findings, one
+moderate.
+
+**Not run clean, but not this phase's fault:** `npm run audit` (part of `verify`) fails on the
+pre-existing `multer`/`@nestjs/*` high-severity chain above — true before this phase too (see
+"Dependency added"), not fixed here (each fix is its own breaking major-version bump, out of this
+phase's scope). Separately, `test/academics.e2e-spec.ts`'s `'analytics groups by class'` test
+now fails on a clean run: it seeds attendance on a hardcoded date (`'2026-09-07'`) and then queries
+`scope: 'daily'` (today) — true on the date that Phase 4 shipped, false now that wall-clock "today"
+has drifted past it. Not touched by this phase (this module's own `test/reports.e2e-spec.ts` uses
+`new Date()`-relative fixture dates for exactly this reason), flagged here since it surfaced while
+running the full suite for this phase's own exit check.
+
+- **Integration task:** run `frontend`'s existing reports component/hook tests against this real
+  backend (not just their own mocked `PrincipalDashboard.test.tsx`) — every contract question this
+  phase had is resolved above, so what's left is verification, not design.
 
 #### 7.9 — Platform Console (Super Admin)
 
@@ -1230,7 +1559,112 @@ anything backend-side.
   audited feature rather than a casual admin convenience; don't add a backend endpoint for it
   without that same review.
 
+**Status: ✅ built + e2e-tested against live Postgres/Redis/MinIO (21 new tests,
+`test/platform.e2e-spec.ts`) — all 20 documented endpoints implemented, wired into `PlatformModule`
+and confirmed live against a running server, not just unit-tested.**
+
+**Two real design decisions this phase had to make that neither module doc nor the schema fully
+settled, both flagged rather than guessed silently:**
+
+- **A Super Admin has to belong to _some_ tenant.** `User.tenantId` has been a required column
+  since Phase 0, and PRD §4 calls Super Admin "the one role not scoped to a school" — those two
+  facts are in tension, and this is the first phase to actually mint a Super Admin session (nothing
+  before this consumed `platform.*` permissions). Considered making `tenantId` nullable across
+  every already-shipped auth code path (`JwtStrategy.validate`'s `!payload.tenantId` check,
+  `AuthService`, `RequestContextService`, `tenant-scoping.ts`) instead — rejected as a large,
+  unnecessary blast radius touching six already-tested phases for a problem with a much smaller
+  fix: `prisma/seed.ts` now seeds one housekeeping `Tenant` (`slug: 'platform-console'`,
+  deliberately no `School` row) to hold the Super Admin account. `SchoolsService`/
+  `PlatformUsersService` both filter on `school: { isNot: null }` specifically so this account
+  never appears in a schools list or a support user search — see `prisma/seed.ts`'s own comment.
+- **Onboarding a school creates its first admin as `status: INVITED` with an unusable password
+  hash**, which surfaced a real, previously-unexercised gap: `AuthService.forgotPassword`'s own
+  lookup (`findAuthCandidatesByIdentifier`) only ever resolves an already-`ACTIVE` account, so it
+  can't be what gets a brand-new INVITED account its first token. Added
+  `AuthService.issueInviteToken` (same dev-only "log it, don't email it" placeholder as
+  `forgotPassword` — Phase 7.7's notification worker still isn't built) and extended
+  `AuthService.resetPassword`/`UsersService.setPasswordAndActivate` (renamed from
+  `updatePasswordHash`) to flip `status` to `ACTIVE` on redemption, not just set the password —
+  a no-op for the existing forgot-password flow (already-`ACTIVE` accounts), and the only thing
+  that makes `POST /platform/schools` not a dead end. Verified end-to-end in
+  `platform.e2e-spec.ts`: onboard → capture the logged invite token → redeem it → log in as the
+  new owner.
+
+**Billing integration** (this phase's stated "biggest scope item"): `platform/billing-provider.ts`
+defines a `BillingProvider` interface with two implementations, chosen by a factory provider in
+`PlatformModule` based on whether `STRIPE_SECRET_KEY` is configured —
+
+- `StripeBillingProvider`: a real integration against the `stripe` SDK (customer + subscription
+  creation with a 14-day trial, plan changes with proration, cancel-at-period-end) plus
+  `platform/billing-webhook.controller.ts`'s `POST /platform/billing/webhook` (public,
+  signature-verified via `stripe.webhooks.constructEvent`, `main.ts`'s new `rawBody: true`) syncing
+  `invoice.paid`/`invoice.payment_failed`/`customer.subscription.deleted` onto
+  `BillingRecord`/`Subscription`. **Not exercised against live Stripe in this environment** (no
+  test-mode API key available here) — reviewed against the `stripe` Node SDK v22 API shape
+  (`current_period_start`/`end` moved onto `SubscriptionItem`, not `Subscription`, in this API
+  version; verified against the installed package's own `.d.ts` files), not verified end-to-end.
+  Verify with a real Stripe test-mode key before relying on this in staging.
+- `LocalBillingProvider`: a real (not faked) dev/CI stand-in — deterministic trial dates, no
+  network call, same discipline `AuthService.forgotPassword`'s dev-only reset-link logging already
+  established. This is what every test in this environment actually runs against.
+
+Every plan/subscription-provisioning call site also writes one `BillingRecord` directly
+(`BillingService.recordFirstPeriod`) right after provisioning — `LocalBillingProvider` never fires
+a webhook (there's no invoicing engine behind it), so without this `BillingTable` would be empty
+forever under local mode; a real Stripe subscription gets this first record the same way _and_
+every later one from the webhook.
+
+**Schema additions:** `Plan`, `Subscription`, `BillingRecord`, `FeatureFlag`, `PlatformAuditLog` —
+none of them in `TENANT_SCOPED_MODELS` (`common/prisma/tenant-scoped-models.ts`'s own doc comment
+already explains why: this module's whole job is reading across every tenant, which
+`applyTenantScoping` would otherwise refuse). All five accessed exclusively through
+`PlatformPrismaService`, the module's third and fourth sanctioned call sites alongside the two
+`platform-prisma.service.ts`'s own doc comment already listed (auth's pre-tenant-context lookups,
+`GET /certificates/verify/:code`). `Subscription.stripeSubscriptionId` and
+`BillingRecord.providerInvoiceId` are both `@unique` (nullable — Postgres allows multiple `NULL`s
+under a unique index) so the webhook handler can `findUnique`/`upsert` by Stripe's own id instead
+of a `findFirst` scan. `FeatureFlag.@@unique([key, tenantId])` does **not** actually stop two
+`PLATFORM`-scope rows (`tenantId: null`) for the same `key` at the DB level — Postgres treats every
+`NULL` as distinct — flagged in the schema's own comment; `prisma/seed.ts`'s `findFirst`-then-
+create-or-update (not `upsert` on that compound key, which Prisma's generated type refuses to
+accept a `null` half of) is what keeps the seeded catalog to one row per key in practice.
+
+**Feature flags ship as admin-console CRUD only this phase** — `GET/PATCH /platform/feature-flags`
+list/toggle a fixed, seeded catalog (self-service flag creation isn't built, matching
+`platform-console.md`'s own "Open questions" note). No feature-owning module actually _reads_ this
+table yet to gate its own behavior: `hostel.md`'s own deferred "not every tenant is a boarding
+school" question (this doc's Phase 7.5 notes) is the seeded `hostel_module` catalog entry, but
+wiring a real consumer — and the "a `TENANT`-scope row wins over the `PLATFORM` one for that
+tenant" resolution logic that implies — is that consumer's own future work, not guessed at here.
+
+**Usage dashboard is a mix of real aggregates and honestly-flagged placeholders**
+(`usage.service.ts`'s own doc comment has the full breakdown) — `activeSchools`/`activeUsers`/
+`activeStudents`/`mrr`/`storageUsedGb` (real, the last one summing every `DocumentVersion.
+sizeBytes` this app has ever stored) and a simplified `churnRatePct` proxy are real; `apiCallsToday`/
+`errorRate24hPct`/`backgroundJobsPending`/`aiTokensToday` are `0` — there is no request-rate
+counter, error-rate tracker, or background job queue anywhere in this codebase yet (`ai/` itself is
+Phase 7.10, explicitly last). **System health's `services[]` are real timed pings** against this
+app's own Postgres/Redis/storage (the same three `/health` already checks, reused here for latency
+`GET /health`'s boolean up/down doesn't give); **`jobQueues` is always `[]`** — an honest empty
+list, not a fabricated queue.
+
+**Dependency added:** `stripe@^22.6.2`. `npm audit` shows it contributes zero entries to the
+vulnerability list — every package that does show up (`@nestjs/*`, `multer`, `prisma`,
+`exceljs`/`uuid`) predates this phase, matching Phase 7.8's own note on the same pre-existing
+`multer`/`@nestjs/*` chain.
+
+- **Integration task:** run `frontend`'s existing platform component/hook tests against this real
+  backend (not just their own mocked `SchoolsPage.test.tsx`/`FeatureFlagsPage.test.tsx`) — every
+  contract question this phase had is resolved above, so what's left is verification, not design.
+  Separately, decide on a real Stripe test-mode key for staging before this billing integration is
+  anything more than `LocalBillingProvider` in practice.
+
 #### 7.10 — AI Assistant (explicitly last, on both sides)
+
+**Status: 🔮 future plan — not started, not scheduled.** Every phase through 7.9 is done; this is
+the only remaining item in this plan, deliberately deferred (PRD §34/§35's own explicit "last"
+framing, restated in this section's own heading). Nothing below has been built — kept here as the
+plan for when this phase actually starts, not as in-progress work.
 
 [`modules/ai-assistant.md`](../frontend/modules/ai-assistant.md)
 
@@ -1316,25 +1750,25 @@ The actual side-by-side status, phase by phase. Update this table as each phase'
 completes — it's the single place that answers "is this module really done, or just done on one
 side?"
 
-| Phase | Module(s)                                                                  | Frontend                                                             | Backend                                                                                                                                                                                      | Integration                                                                                                                                                                                                |
-| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Foundation                                                                 | ✅ done                                                              | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                                                                             | — (no frontend-facing surface)                                                                                                                                                                             |
-| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis                                                                                                                                            | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                                                                                               |
-| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                            | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                                                                                 | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                                                                                     |
-| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time)                                                              | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending                                                                   |
-| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                                                                                 | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending                                                                         |
-| 5     | Examinations                                                               | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                                                                                 | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending                                                                  |
-| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**        | ✅ built + e2e-tested against live Postgres/Redis (33 tests) + confirmed the admissions↔fees integration end-to-end                                                                          | ⏳ backend confirmed (see Phase 6 notes above) — **PRD §65 MVP genuinely end-to-end once frontend's Phase 6 screens are re-verified against these real endpoints**; cross-stack verification still pending |
-| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                            | ✅ built + e2e-tested against live Postgres/Redis/MinIO (10 new tests; also fixed a MinIO-reachability infra bug that had been silently affecting every earlier phase — see Phase 7.1 notes) | ⏳ backend confirmed (see Phase 7.1 notes above); cross-stack verification still pending                                                                                                                   |
-| 7.2   | Library                                                                    | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)      | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend; fee-linkage decision needed first                                                                                                                                                   |
-| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend; teacher↔employee linkage decision needed first                                                                                                                                      |
-| 7.7   | Communication                                                              | ✅ done, assumed contract (realtime gateway not built either side)   | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend                                                                                                                                                                                      |
-| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                            | ⏳ not started                                                                                                                                                                               | ⏳ blocked on backend; billing-provider integration is this phase's real scope                                                                                                                             |
-| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer) | ⏳ not started                                                                                                                                                                               | ⏳ backend's tool-calling layer must land before either side does feature work                                                                                                                             |
+| Phase | Module(s)                                                                  | Frontend                                                                         | Backend                                                                                                                                                                                                                    | Integration                                                                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | Foundation                                                                 | ✅ done                                                                          | ✅ scaffolded (unverified against a live DB in this environment — see Phase 0's own status note)                                                                                                                           | — (no frontend-facing surface)                                                                                                                                                                             |
+| 1     | Auth & Identity                                                            | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis                                                                                                                                                                          | ✅ confirmed backend-side (see Phase 1 notes above); frontend bootstrap-retry-storm bug found, not yet fixed                                                                                               |
+| 2     | School Setup & Core Entities                                               | ✅ done, assumed contract                                                        | ✅ built + unit-tested; e2e spec written, unverified against live Postgres/Redis in this env                                                                                                                               | ⏳ nested-resource shape confirmed (see Phase 2 notes); cross-stack verification still pending live DB                                                                                                     |
+| 3     | People (Students/Parents/Teachers/Admissions) + Documents upload primitive | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis/MinIO (32 new tests; also confirmed Phase 0–2's e2e specs for the first time)                                                                                            | ⏳ two real gaps flagged (enroll's missing gender/section data, Parent.userId provisioning) — otherwise cross-stack verification pending                                                                   |
+| 4     | Academics (Timetable/Attendance/Homework)                                  | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (38 tests)                                                                                                                                                               | ⏳ `'me'` idiom + permission catalog confirmed backend-side; `groupBy=branch` schema gap flagged; cross-stack verification pending                                                                         |
+| 5     | Examinations                                                               | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (23 tests)                                                                                                                                                               | ⏳ grading scale, report-card series grouping, marks lock/reopen confirmed backend-side; cross-stack verification + print-preview pending                                                                  |
+| 6     | Finance (Fees, Search)                                                     | ✅ done, assumed contract — **closes frontend's PRD §65 MVP**                    | ✅ built + e2e-tested against live Postgres/Redis (33 tests) + confirmed the admissions↔fees integration end-to-end                                                                                                        | ⏳ backend confirmed (see Phase 6 notes above) — **PRD §65 MVP genuinely end-to-end once frontend's Phase 6 screens are re-verified against these real endpoints**; cross-stack verification still pending |
+| 7.1   | Documents & Certificates                                                   | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis/MinIO (10 new tests; also fixed a MinIO-reachability infra bug that had been silently affecting every earlier phase — see Phase 7.1 notes)                               | ⏳ backend confirmed (see Phase 7.1 notes above); cross-stack verification still pending                                                                                                                   |
+| 7.2   | Library                                                                    | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (22 new tests; see Phase 7.2 notes)                                                                                                                                      | ⏳ backend confirmed (see Phase 7.2 notes above); cross-stack verification still pending                                                                                                                   |
+| 7.3   | Transport (vehicle/route)                                                  | ✅ done, assumed contract (live tracking not built either side)                  | ✅ built + e2e-tested against live Postgres/Redis (22 new tests; see Phase 7.3 notes)                                                                                                                                      | ⏳ backend confirmed (see Phase 7.3 notes above); cross-stack verification still pending                                                                                                                   |
+| 7.4   | Inventory & Assets                                                         | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (26 new tests; see Phase 7.4 notes — caught and fixed an `AssetStatus` enum-vs-hyphen bug before it shipped)                                                             | ⏳ backend confirmed (see Phase 7.4 notes above); cross-stack verification still pending                                                                                                                   |
+| 7.5   | Hostel                                                                     | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (42 new tests; see Phase 7.5 notes)                                                                                                                                      | ⏳ backend confirmed (see Phase 7.5 notes above); fee-linkage and feature-flag-gating decisions still open; cross-stack verification pending                                                               |
+| 7.6   | HR & Payroll                                                               | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (30 new tests; see Phase 7.6 notes — resolved the teacher↔employee linkage as a real `Employee.teacherId` FK)                                                            | ⏳ backend confirmed (see Phase 7.6 notes above); `TeacherProfile.tsx`'s `TeacherLeaveTab` needs a small follow-up to use the real linkage; cross-stack verification pending                               |
+| 7.7   | Communication                                                              | ✅ done, assumed contract (built against polling; `/ws` client not wired in yet) | ✅ built + e2e-tested against live Postgres/Redis (`test/communication.e2e-spec.ts`), including the `/ws` gateway — see Phase 7.7 notes above (this row was stale until this status pass; the module was already complete) | ⏳ backend confirmed (see Phase 7.7 notes above); `PtmSlotManager.tsx`'s `teacherId=me` fix and wiring a real `/ws` client (frontend still polls) still open; cross-stack verification pending             |
+| 7.8   | Reports & Analytics                                                        | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis (14 new tests; see Phase 7.8 notes — no new migration, added `exceljs` for real `.xlsx` export, added a CSV/Excel formula-injection guard)                               | ⏳ backend confirmed (see Phase 7.8 notes above); cross-stack verification still pending                                                                                                                   |
+| 7.9   | Platform Console                                                           | ✅ done, assumed contract                                                        | ✅ built + e2e-tested against live Postgres/Redis/MinIO (21 new tests; see Phase 7.9 notes — Stripe billing integration real but unverified against live Stripe, `LocalBillingProvider` dev stand-in exercised instead)    | ⏳ backend confirmed (see Phase 7.9 notes above); cross-stack verification still pending; a real Stripe test-mode key needed before billing is anything more than local mode                               |
+| 7.10  | AI Assistant                                                               | ⏳ not started (correctly — blocked on backend's tool-calling layer)             | ⏳ not started                                                                                                                                                                                                             | ⏳ backend's tool-calling layer must land before either side does feature work                                                                                                                             |
 
 **Reading this table:** the frontend column is almost entirely "done" already — that's the starting
 condition this whole plan was written for, not a milestone to celebrate mid-project. The real work

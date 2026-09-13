@@ -1,0 +1,57 @@
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
+import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { SkipAudit } from '../common/decorators/skip-audit.decorator';
+import { SchoolsService } from './schools.service';
+import {
+  ListSchoolsQueryDto,
+  PagedSchoolsDto,
+  SchoolDetailResponseDto,
+  SchoolOnboardingDto,
+  SchoolResponseDto,
+  UpdateSchoolStatusDto,
+} from './dto/school.dto';
+
+/** See `plans.controller.ts`'s own comment on why every mutating route here is `@SkipAudit()`. */
+@ApiTags('platform')
+@Controller('platform/schools')
+export class SchoolsController {
+  constructor(private readonly schools: SchoolsService) {}
+
+  @Get()
+  @RequirePermission('platform.schools.manage')
+  list(@Query() query: ListSchoolsQueryDto): Promise<PagedSchoolsDto> {
+    return this.schools.list(query);
+  }
+
+  @Get(':id')
+  @RequirePermission('platform.schools.manage')
+  get(@Param('id') id: string): Promise<SchoolDetailResponseDto> {
+    return this.schools.get(id);
+  }
+
+  @Post()
+  @RequirePermission('platform.schools.manage')
+  @SkipAudit()
+  create(@Body() dto: SchoolOnboardingDto): Promise<SchoolResponseDto> {
+    return this.schools.create(dto);
+  }
+
+  @Patch(':id')
+  @RequirePermission('platform.schools.manage')
+  @SkipAudit()
+  updateStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateSchoolStatusDto,
+  ): Promise<SchoolResponseDto> {
+    return this.schools.updateStatus(id, dto);
+  }
+}

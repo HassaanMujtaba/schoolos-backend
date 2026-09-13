@@ -27,6 +27,15 @@ import { ExaminationsModule } from './examinations/examinations.module';
 import { FeesModule } from './fees/fees.module';
 import { SearchModule } from './search/search.module';
 import { CertificatesModule } from './certificates/certificates.module';
+import { LibraryModule } from './library/library.module';
+import { TransportModule } from './transport/transport.module';
+import { InventoryModule } from './inventory/inventory.module';
+import { HostelModule } from './hostel/hostel.module';
+import { HrModule } from './hr/hr.module';
+import { PayrollModule } from './payroll/payroll.module';
+import { CommunicationModule } from './communication/communication.module';
+import { ReportsModule } from './reports/reports.module';
+import { PlatformModule } from './platform/platform.module';
 
 @Module({
   imports: [
@@ -66,7 +75,29 @@ import { CertificatesModule } from './certificates/certificates.module';
     // Phase 7.1 — Documents & Certificates. The documents/ storage half was already built in
     // Phase 3 (see DocumentsModule above); this is just the certificate-generation half.
     CertificatesModule,
-    // Phase 7.2+ feature modules mount here, in the order listed in
+    // Phase 7.2 — Library.
+    LibraryModule,
+    // Phase 7.3 — Transport (vehicle/route management; live tracking is its own sub-phase).
+    TransportModule,
+    // Phase 7.4 — Inventory & Assets.
+    InventoryModule,
+    // Phase 7.5 — Hostel.
+    HostelModule,
+    // Phase 7.6 — HR & Payroll. PayrollModule imports HrModule directly for the
+    // employee-existence/name/designation lookups a salary structure/payslip needs, same
+    // FeesModule→AdmissionsModule cross-module pattern above.
+    HrModule,
+    PayrollModule,
+    // Phase 7.7 — Communication (notifications, messaging, announcements, events/calendar, PTM)
+    // + the `/ws` realtime gateway.
+    CommunicationModule,
+    // Phase 7.8 — Reports & Analytics. Imports FeesModule directly (see ReportsModule's own doc
+    // comment) for the outstanding-balance reuse.
+    ReportsModule,
+    // Phase 7.9 — Platform Console (Super Admin). Imports AuthModule directly (see its own doc
+    // comment), same cross-module-reuse pattern the phases above already establish.
+    PlatformModule,
+    // Phase 7.10+ feature modules mount here, in the order listed in
     // ../implementation-plan.md's phase table.
   ],
   providers: [

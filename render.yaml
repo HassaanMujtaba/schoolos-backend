@@ -1,0 +1,63 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploys the NestJS API as a free web service. DB is external (Supabase), Redis is external
+# (Upstash), object storage is external (Cloudflare R2) — this service has no paid Render
+# add-ons, so the whole stack stays on free tiers.
+#
+# One-time setup: push this repo to GitHub, then in the Render dashboard choose
+# New > Blueprint, point it at the repo, and fill in the `sync: false` env vars below when
+# prompted (Render won't invent values for those — it pauses the first deploy until you do).
+services:
+  - type: web
+    name: schoolos-backend
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm ci --include=dev && npx prisma generate && npm run build
+    startCommand: npx prisma migrate deploy && node dist/main
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Supabase Postgres connection string for the `school-os` project (Settings > Database >
+      # Connection string > URI, "Transaction" pooler mode — port 6543 — since a free web
+      # service opens/closes connections per instance restart rather than holding a long-lived
+      # pool).
+      - key: DATABASE_URL
+        sync: false
+
+      # Upstash Redis "TLS" URL (rediss://...) from the Upstash console — ioredis auto-enables
+      # TLS for the rediss:// scheme, no extra config needed.
+      - key: REDIS_URL
+        sync: false
+
+      # openssl rand -base64 48 — distinct values, never reused from local dev.
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_TTL
+        value: 15m
+      - key: JWT_REFRESH_TTL
+        value: 30d
+
+      # Real frontend origin(s), comma-separated, no "*" (security-standards).
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Cloudflare R2 (S3-compatible): https://<account-id>.r2.cloudflarestorage.com
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_REGION
+        value: auto
+
+      - key: FRONTEND_BASE_URL
+        sync: false

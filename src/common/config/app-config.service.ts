@@ -85,6 +85,17 @@ export class AppConfigService {
     );
   }
 
+  // Phase 7.9 — Platform Console billing. See `env.validation.ts`'s own doc comment for why this
+  // pair is optional (unlike the S3_* getters above, which throw): `undefined` here just means
+  // `BillingProviderModule` wires up `LocalBillingProvider` instead of `StripeBillingProvider`.
+  get stripeSecretKey(): string | undefined {
+    return this.config.get<string>('STRIPE_SECRET_KEY');
+  }
+
+  get stripeWebhookSecret(): string | undefined {
+    return this.config.get<string>('STRIPE_WEBHOOK_SECRET');
+  }
+
   private getOrThrow(key: string): string {
     const value = this.config.get<string>(key);
     if (!value) {

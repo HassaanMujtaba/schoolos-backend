@@ -23,9 +23,12 @@ enum TenantStatus {
 }
 
 /// Not itself tenant-scoped (it defines what a tenant *is*) — every other model in this file
-/// carries tenantId and is enforced by PrismaService's query extension. Plan/Subscription/Billing
-/// (PRD §53, Phase 7.9 Platform Console) get their own models when that phase starts; `plan` here
-/// is a placeholder label only.
+/// carries tenantId and is enforced by PrismaService's query extension. `plan` below is a
+/// leftover placeholder label from before Phase 7.9 added the real `Plan`/`Subscription`/
+/// `BillingRecord` models (see this file's own "Platform Console" section near the bottom) —
+/// nothing reads it (`grep` turned up zero call sites when that phase started); kept rather than
+/// migrated away since dropping a column nobody populated yet is lower-risk than a data migration
+/// nobody's read path depends on either way.
 model Tenant {
   id        String       @id @default(uuid())
   name      String
@@ -35,26 +38,52 @@ model Tenant {
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
-  branches         Branch[]
-  users            User[]
-  auditLogs        AuditLog[]
-  school           School?
-  academicYears    AcademicYear[]
-  classes          SchoolClass[]
-  sections         Section[]
-  subjects         Subject[]
-  parents          Parent[]
-  students         Student[]
-  teachers         Teacher[]
-  admissions       AdmissionApplication[]
-  documents        Document[]
-  timetableEntries TimetableEntry[]
-  substitutions    Substitution[]
-  homework         Homework[]
-  exams            Exam[]
-  feeStructures    FeeStructure[]
-  invoices         Invoice[]
-  certificates     Certificate[]
+  branches          Branch[]
+  users             User[]
+  auditLogs         AuditLog[]
+  school            School?
+  academicYears     AcademicYear[]
+  classes           SchoolClass[]
+  sections          Section[]
+  subjects          Subject[]
+  parents           Parent[]
+  students          Student[]
+  teachers          Teacher[]
+  admissions        AdmissionApplication[]
+  documents         Document[]
+  timetableEntries  TimetableEntry[]
+  substitutions     Substitution[]
+  homework          Homework[]
+  exams             Exam[]
+  feeStructures     FeeStructure[]
+  invoices          Invoice[]
+  certificates      Certificate[]
+  libraryCategories LibraryCategory[]
+  libraryShelves    LibraryShelf[]
+  libraryBooks      Book[]
+  libraryMembers    LibraryMember[]
+  librarySettings   LibrarySettings?
+  vehicles          Vehicle[]
+  routes            Route[]
+  stockCategories   StockCategory[]
+  stockItems        StockItem[]
+  assets            Asset[]
+  hostels           Hostel[]
+  hostelRooms       Room[]
+  hostelAllocations Allocation[]
+  hostelComplaints  Complaint[]
+  employees         Employee[]
+  payrollPeriods    PayrollPeriod[]
+  messageThreads    MessageThread[]
+  announcements     Announcement[]
+  events            Event[]
+  ptmSlots          PtmSlot[]
+  // Phase 7.9 — Platform Console. Real FKs (unlike FeatureFlag/PlatformAuditLog below, which
+  // denormalize tenantId/tenantName as plain fields instead) because these two are queried
+  // together with live Tenant/School data on every list view, not read back as a historical
+  // snapshot — see this file's own "Platform Console" section for the full reasoning.
+  subscription      Subscription?
+  billingRecords    BillingRecord[]
 
   @@map("tenants")
 }
@@ -560,8 +589,14 @@ model Teacher {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  assignments TeacherAssignment[]
+  tenant         Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignments    TeacherAssignment[]
+  /// Reverse side of `Employee.teacherId` (Phase 7.6) — the real teacher↔employee link, see that
+  /// field's own doc comment. No FK columns on this side; Prisma requires the reverse relation
+  /// field to be declared even though the foreign key itself lives on `Employee`.
+  employeeRecord Employee?
+  /// Reverse side of `PtmSlot.teacherId` (Phase 7.7) — see that field's own doc comment.
+  ptmSlots       PtmSlot[]
 
   @@unique([tenantId, employeeId])
   @@index([tenantId])
@@ -671,6 +706,11 @@ enum DocumentCategory {
   contract
   certificate
   report
+  // Phase 7.3 — Transport. `VehicleForm`'s documents tab is still client-side-only (nothing
+  // submits through `POST /documents/upload` yet, `../implementation-plan.md`'s Phase 7.3 own
+  // note), but `Vehicle.documents` resolves the same real way `Student.documents` already does
+  // (category + ownerId), so wiring the frontend up later is additive, not a schema change.
+  vehicle
 }
 
 /// The owning record (one per logical file); `versions` below holds the actual content pointers.
@@ -1153,6 +1193,7 @@ model FeeStructure {
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   invoices Invoice[]
+  routes   Route[]
 
   @@index([tenantId])
   @@map("fee_structures")
@@ -1243,6 +1284,1175 @@ model Payment {
 }
 
 // ---------------------------------------------------------------------------
+// Library (PRD §22, Phase 7.2) — `frontend/modules/library.md` "Backend dependencies" is the
+// source contract. Two simplifications from PRD §22's entity list, carried over from the
+// frontend's own (already-shipped) simplifications rather than re-litigated here: authors/
+// publishers are free-text fields on `Book`, not their own normalized entities, and there is no
+// separate `Fine` entity — a fine is just `Loan.fineAmount`/`.fineStatus`, and
+// `GET /library/fines` is `GET /library/loans` filtered to `fineStatus != none` (same
+// "entity list corrected against what the frontend actually built" pattern as Phase 3's dropped
+// `AdmissionInquiry` and Phase 4's collapsed `TimetableEntry`).
+// ---------------------------------------------------------------------------
+
+/// Lightweight reference lists (`library.md`'s "Categories and shelves ... add/delete only, no
+/// other fields"). `Book.categoryId`/`.shelfId` are plain string columns, not FK relations, same
+/// "peer entity, no ownership hierarchy" trade-off as `TimetableEntry.subjectId` — validated at
+/// the application layer, not the database, so deleting a category never cascades into books.
+model LibraryCategory {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("library_categories")
+}
+
+model LibraryShelf {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("library_shelves")
+}
+
+/// §22 Catalog. `totalCopies`/`availableCopies` on `frontend/src/features/library/api.ts`'s `Book`
+/// are computed from the `copies` relation at read time (`LibraryCatalogService.toBookResponse`),
+/// never stored columns — same "server-computed, never trusted from the client" discipline as
+/// every other derived count in this schema (`Invoice.status`, `Exam`'s rank/GPA).
+model Book {
+  id          String   @id @default(uuid())
+  tenantId    String
+  title       String
+  isbn        String   @default("")
+  author      String
+  publisher   String   @default("")
+  categoryId  String   @default("")
+  shelfId     String   @default("")
+  edition     String   @default("")
+  description String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  copies       BookCopy[]
+  reservations Reservation[]
+
+  @@index([tenantId])
+  @@map("library_books")
+}
+
+enum CopyStatus {
+  available
+  issued
+  lost
+  damaged
+}
+
+/// One row per physical copy, looked up by `barcode` at the circulation desk
+/// (`GET /library/copies/lookup?barcode=`) — resolved as keyboard-wedge scanner input per
+/// `library.md`'s own open question, so `barcode` is just a plain unique string, no camera/device
+/// plumbing. No direct `tenant Tenant` relation — same high-volume-leaf trade-off as
+/// `Payment`/`AttendanceRecord` (cascades transitively via `book`), `tenantId` stays a plain
+/// scoped column enforced by `PrismaService`'s tenant-scoping extension.
+model BookCopy {
+  id        String     @id @default(uuid())
+  tenantId  String
+  bookId    String
+  barcode   String
+  status    CopyStatus @default(available)
+  createdAt DateTime   @default(now())
+
+  book  Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  loans Loan[]
+
+  @@unique([tenantId, barcode])
+  @@index([tenantId])
+  @@index([bookId])
+  @@map("library_book_copies")
+}
+
+enum LibraryMemberType {
+  student
+  teacher
+}
+
+enum LibraryMemberStatus {
+  active
+  suspended
+}
+
+/// §22 Members — `library.md`'s "link to students/staff, don't duplicate person records": a
+/// `{ memberType, personId }` reference plus lending limits, not a new person record. `personId`
+/// is a plain string (no FK to `Student`/`Teacher`, whichever `memberType` says), same "peer
+/// entity" trade-off as `Book.categoryId` — validated in `LibraryMembersService` against the real
+/// table before create. `personLabel` is a client-supplied denormalized snapshot
+/// (`MemberForm`'s own search-and-pick result), same discipline as `DocumentVersion.
+/// uploadedByLabel` — never re-derived from `Student`/`Teacher` on every read.
+model LibraryMember {
+  id             String              @id @default(uuid())
+  tenantId       String
+  memberType     LibraryMemberType
+  personId       String
+  personLabel    String
+  maxBooks       Int                 @default(3)
+  loanPeriodDays Int                 @default(14)
+  status         LibraryMemberStatus @default(active)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  loans        Loan[]
+  reservations Reservation[]
+
+  @@unique([tenantId, memberType, personId])
+  @@index([tenantId])
+  @@map("library_members")
+}
+
+enum FineStatus {
+  none
+  pending
+  paid
+  waived
+}
+
+/// `library.md`'s "resolved: reserve on a member's behalf" return conditions
+/// (`schemas.ts`'s `RETURN_CONDITIONS`) — recorded on the loan for its own sake (an audit trail of
+/// how a copy actually came back) even though the frontend's `Loan` response type doesn't surface
+/// it back; `condition !== 'ok'` is what drives the copy's post-return `status`.
+enum ReturnCondition {
+  ok
+  lost
+  damaged
+}
+
+/// §22 Circulation — one row per issue/return cycle. No separate `Fine` entity (see this section's
+/// header comment): `fineAmount`/`fineStatus` live here, computed server-side at return time
+/// (`LibraryCirculationService.returnBook`, mirroring `frontend/src/features/library/lib/
+/// fines.ts`'s `calculateFine` so the two sides agree) — never trusted from the client. No direct
+/// `tenant Tenant` relation, same leaf trade-off as `BookCopy` above (cascades via `copy`/
+/// `member`).
+model Loan {
+  id              String           @id @default(uuid())
+  tenantId        String
+  copyId          String
+  memberId        String
+  issuedAt        DateTime         @default(now()) @db.Date
+  dueAt           DateTime         @db.Date
+  returnedAt      DateTime?        @db.Date
+  returnCondition ReturnCondition?
+  fineAmount      Float            @default(0)
+  fineStatus      FineStatus       @default(none)
+  createdAt       DateTime         @default(now())
+
+  copy   BookCopy      @relation(fields: [copyId], references: [id], onDelete: Cascade)
+  member LibraryMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([copyId])
+  @@index([memberId])
+  @@map("library_loans")
+}
+
+enum ReservationStatus {
+  pending
+  fulfilled
+  cancelled
+}
+
+/// §22 Reservations (`library.md`'s "Not built" section, now resolved) — a FIFO queue per book.
+/// `queuePosition` (`frontend/src/features/library/api.ts`'s `Reservation.queuePosition`) is
+/// computed at read time as this row's 1-indexed rank among `pending` reservations for the same
+/// `bookId` ordered by `reservedAt`, never a stored column — same "server-computed" discipline as
+/// `Book.totalCopies`. `memberLabel` is always resolved from the linked `LibraryMember.
+/// personLabel`, never client-supplied — unlike `Loan`, `createReservation`'s payload
+/// (`api.ts`) never sends a label. No direct `tenant Tenant` relation, same leaf trade-off as
+/// `Loan` (cascades via `book`/`member`).
+model Reservation {
+  id         String            @id @default(uuid())
+  tenantId   String
+  bookId     String
+  memberId   String
+  reservedAt DateTime          @default(now()) @db.Date
+  status     ReservationStatus @default(pending)
+  createdAt  DateTime          @default(now())
+
+  book   Book          @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  member LibraryMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([bookId])
+  @@index([memberId])
+  @@map("library_reservations")
+}
+
+/// `library.md`'s "Open questions: Fine rate", now resolved — a single per-tenant settings
+/// document (`GET/PATCH /library/settings`), same one-row-per-tenant shape as `School`.
+model LibrarySettings {
+  tenantId       String   @id
+  finePerDayRate Float    @default(0)
+  maxFine        Float?
+  updatedAt      DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("library_settings")
+}
+
+// ---------------------------------------------------------------------------
+// Transport (PRD §23, Phase 7.3) — vehicle/route management only; live tracking (§23 Live
+// Tracking: GPS WebSocket channel, geofencing, pickup/drop-off confirmation) is its own
+// not-yet-scheduled sub-phase, see `../implementation-plan.md`'s Phase 7.3 section.
+// ---------------------------------------------------------------------------
+
+enum VehicleType {
+  bus
+  van
+  car
+  other
+}
+
+enum VehicleStatus {
+  active
+  maintenance
+  inactive
+}
+
+/// §23 Vehicles. `driverName`/`driverPhone` are free text — no Staff/HR module yet
+/// (`hr-payroll.md` is backlog), same placeholder pattern `Section.classTeacherName` already set.
+model Vehicle {
+  id                  String        @id @default(uuid())
+  tenantId            String
+  registrationNumber  String
+  type                VehicleType
+  capacity            Int
+  status              VehicleStatus @default(active)
+  driverName          String        @default("")
+  driverPhone         String        @default("")
+  insuranceProvider   String        @default("")
+  /// Nullable rather than a plain free-text string (unlike `driverName`/`driverPhone` above) —
+  /// `transport.md` lists insurance expiry as a tracked field a future "expiring soon" report
+  /// would query/sort by, so it's worth keeping as a real date from day one even though nothing
+  /// reads it that way yet. `''` from the frontend's `<input type="date">` round-trips to `null`,
+  /// same as `Loan.returnedAt`'s own nullable-date shape.
+  insuranceExpiryDate DateTime?     @db.Date
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  tenant             Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  maintenanceRecords VehicleMaintenanceRecord[]
+  routes             Route[]
+
+  @@unique([tenantId, registrationNumber])
+  @@index([tenantId])
+  @@map("vehicles")
+}
+
+/// Repeatable date/description/cost list nested under a Vehicle — replaced wholesale on every
+/// vehicle write, same `Building`/`Department` "still a real child table underneath an
+/// array-in-payload contract" convention (`Branch`'s own doc comment). Ordered by `date desc` at
+/// read time (most recent first), not by a stored sequence — there's no user-meaningful ordering
+/// beyond chronological, unlike `RouteStop.order` below.
+model VehicleMaintenanceRecord {
+  id          String   @id @default(uuid())
+  tenantId    String
+  vehicleId   String
+  date        DateTime @db.Date
+  description String
+  cost        Float?
+  createdAt   DateTime @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([vehicleId])
+  @@map("vehicle_maintenance_records")
+}
+
+/// §23 Routes. `studentIds` is a plain string array, same trade-off as `Teacher.subjectIds`/
+/// `Subject.classIds` (referential integrity enforced in `routes.service.ts`, not a DB foreign
+/// key) — `../implementation-plan.md`'s Phase 7.3 entity list originally drafted a separate
+/// `TransportAssignment` join entity; the actually-built frontend (`schemas.ts`'s `routeSchema`,
+/// `RouteForm.tsx`'s search-and-pick student list) sends and reads back one flat `studentIds[]`
+/// on the route itself, never a separate assignment resource, same "no separate aggregate entity"
+/// correction every earlier phase's own status note already made at least once.
+/// `feeStructureId` is nullable — `RouteForm.tsx` sends `''` for "no linkage", normalized to
+/// `null` in `routes.service.ts` (`fees.md`'s fee-linkage is optional per the module doc's own
+/// contract note).
+model Route {
+  id             String   @id @default(uuid())
+  tenantId       String
+  name           String
+  vehicleId      String
+  driverName     String   @default("")
+  attendantName  String   @default("")
+  feeStructureId String?
+  studentIds     String[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vehicle      Vehicle       @relation(fields: [vehicleId], references: [id])
+  feeStructure FeeStructure? @relation(fields: [feeStructureId], references: [id], onDelete: SetNull)
+  stops        RouteStop[]
+
+  @@index([tenantId])
+  @@index([vehicleId])
+  @@index([feeStructureId])
+  @@map("routes")
+}
+
+/// Repeatable name/time list nested under a Route — replaced wholesale on every route write, same
+/// `Building`/`Department` convention as `VehicleMaintenanceRecord` above. Unlike maintenance
+/// records, stop order is operationally meaningful (the sequence a vehicle actually visits them
+/// in), so it's a stored `order` column set from the submitted array's index at write time, not
+/// re-derived from `name`/`time` at read time.
+model RouteStop {
+  id       String @id @default(uuid())
+  tenantId String
+  routeId  String
+  name     String
+  time     String @default("")
+  order    Int    @default(0)
+
+  route Route @relation(fields: [routeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([routeId])
+  @@map("route_stops")
+}
+
+// ---------------------------------------------------------------------------
+// Inventory & Assets (PRD §24, Phase 7.4) — `frontend/modules/inventory.md` "Backend
+// dependencies" is the source contract. Two distinct models, same split the module doc itself
+// draws: consumable **stock** (a category reference list + a running quantity, adjusted only
+// through a logged `StockMovement` — `quantity` is never client-writable past creation, see
+// `StockItemsService.update`'s own doc comment) and fixed **assets** (a full lifecycle record;
+// depreciation is resolved client-side, straight-line, `lib/depreciation.ts` — nothing computed
+// or stored here, per that module doc's own resolved "Open questions" note).
+// ---------------------------------------------------------------------------
+
+/// Lightweight reference list (`inventory.md`'s "categories ... stationery, uniforms, books, lab
+/// equipment, sports equipment, consumables"), same add/delete-only shape as `LibraryCategory`.
+/// `StockItem.categoryId` is a plain string column, not an FK relation — same "peer entity, no
+/// ownership hierarchy" trade-off as `Book.categoryId`/`.shelfId`, validated at the application
+/// layer (`StockItemsService.assertCategoryExists`), not the database.
+model StockCategory {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("stock_categories")
+}
+
+/// §24 Inventory. `quantity` starts from the create payload but is otherwise read-only through
+/// this model's own CRUD — `StockForm.tsx` disables the field once an item exists, and this
+/// service enforces that server-side too (an update's `quantity` is ignored, the stored value is
+/// kept), so `StockMovement` stays the one authoritative log of every change.
+model StockItem {
+  id                String   @id @default(uuid())
+  tenantId          String
+  name              String
+  categoryId        String
+  unit              String
+  quantity          Int      @default(0)
+  lowStockThreshold Int      @default(0)
+  unitCost          Float?
+  notes             String   @default("")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  movements StockMovement[]
+
+  @@index([tenantId])
+  @@index([categoryId])
+  @@map("stock_items")
+}
+
+enum StockMovementType {
+  restock
+  issue
+  adjustment
+}
+
+/// `inventory.md`'s "issue/adjustment log" (`StockAdjustmentDialog`) — one append-only row per
+/// issue/restock/adjustment. `quantityChange` is a signed delta the frontend itself computes
+/// (positive for a restock, negative otherwise, per that component's own doc comment) and
+/// `StockItemsService.recordMovement` simply applies it to `StockItem.quantity` — never re-derives
+/// the sign from `type` server-side, and rejects a movement that would take quantity negative. No
+/// direct `tenant Tenant` relation, same high-volume-leaf trade-off as `Loan`/`Payment`/
+/// `VehicleMaintenanceRecord` — created via a top-level call, so `PrismaService`'s tenant-scoping
+/// extension still stamps `tenantId` on it without needing a declared relation.
+model StockMovement {
+  id             String            @id @default(uuid())
+  tenantId       String
+  stockItemId    String
+  type           StockMovementType
+  quantityChange Int
+  issuedTo       String            @default("")
+  reason         String            @default("")
+  date           DateTime          @db.Date
+  createdAt      DateTime          @default(now())
+
+  stockItem StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([stockItemId])
+  @@map("stock_movements")
+}
+
+enum AssetCategory {
+  computer
+  furniture
+  vehicle
+  equipment
+  other
+}
+
+/// §24 Assets — full lifecycle record (asset ID, purchase date/cost, location, assigned person,
+/// warranty, maintenance, disposal). `location`/`assignedTo` are free text, same placeholder
+/// pattern `Section.classTeacherName`/`Vehicle.driverName` already set — no Staff/HR module yet to
+/// pick a real person from. `warrantyExpiryDate`/`disposalDate` are nullable dates, not plain
+/// strings, same "worth keeping as a real date from day one" reasoning as `Vehicle.
+/// insuranceExpiryDate` — `''` from the frontend's `<input type="date">` round-trips to `null`.
+/// `status` is a plain `String`, not a Prisma enum like `category` above — the frontend's own
+/// literals (`schemas.ts`'s `ASSET_STATUSES`) are hyphenated ("in-use", "in-storage",
+/// "under-maintenance", "disposed"), and a Prisma enum's *member names* can't contain a hyphen.
+/// `@map` on an enum value only renames its database representation, not the string the generated
+/// client actually reads/writes in TypeScript — using it here would silently reintroduce exactly
+/// the translation layer this schema's "match the frontend string exactly" discipline exists to
+/// avoid (caught before this shipped, see git history). Validated at the application layer
+/// instead (`ASSET_STATUSES`/`@IsIn` in `assets/dto/asset.dto.ts`), same "peer entity, no DB-level
+/// constraint" trade-off `Book.categoryId`/`.shelfId` already make for a client-owned string set.
+model Asset {
+  id                 String        @id @default(uuid())
+  tenantId           String
+  assetCode          String
+  name               String
+  category           AssetCategory
+  status             String        @default("in-use")
+  purchaseDate       DateTime      @db.Date
+  purchaseCost       Float
+  usefulLifeYears    Int
+  location           String        @default("")
+  assignedTo         String        @default("")
+  warrantyExpiryDate DateTime?     @db.Date
+  disposalDate       DateTime?     @db.Date
+  disposalReason     String        @default("")
+  disposalValue      Float?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  tenant             Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  maintenanceRecords AssetMaintenanceRecord[]
+
+  @@unique([tenantId, assetCode])
+  @@index([tenantId])
+  @@map("assets")
+}
+
+/// Repeatable date/description/cost list nested under an Asset — replaced wholesale on every
+/// asset write (delete-then-recreate in the same transaction), same `VehicleMaintenanceRecord`
+/// convention (ordered by `date desc` at read time, no direct `tenant Tenant` relation — a
+/// nested-only leaf, manually stamped with `tenantId` by `AssetsService` since the tenant-scoping
+/// extension can't see into a nested `data.maintenanceRecords: { create: [...] }` write).
+model AssetMaintenanceRecord {
+  id          String   @id @default(uuid())
+  tenantId    String
+  assetId     String
+  date        DateTime @db.Date
+  description String
+  cost        Float?
+  createdAt   DateTime @default(now())
+
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([assetId])
+  @@map("asset_maintenance_records")
+}
+
+// ---------------------------------------------------------------------------
+// Hostel (PRD §25, Phase 7.5) — `frontend/modules/hostel.md` "Backend dependencies" is the
+// source contract. The PRD's `hostel → building → floor → room → bed` hierarchy is collapsed to
+// `hostel → room → bed`, matching the frontend's own already-shipped simplification: a school
+// with several physical hostel buildings just registers each as its own `Hostel`, `floor` survives
+// as a free-text `Room.floorLabel`, and beds are never their own entity — a room's `capacity` is
+// its bed count, occupancy derived from active `Allocation`s (bed numbers `1..capacity`), matching
+// `lib/occupancy.ts`'s frontend logic exactly so the two never disagree about which beds are free.
+// Hostel fee linkage stays unresolved on both sides (`hostel.md`'s own open question, no frontend
+// wiring exists for it) — not built here either.
+// ---------------------------------------------------------------------------
+
+enum HostelType {
+  boys
+  girls
+  mixed
+}
+
+/// §25. `wardenName` is free text, same placeholder pattern `Section.classTeacherName`/`Vehicle.
+/// driverName` already set — no Staff/HR module yet to pick a real person from.
+model Hostel {
+  id         String     @id @default(uuid())
+  tenantId   String
+  name       String
+  type       HostelType
+  address    String     @default("")
+  wardenName String     @default("")
+  notes      String     @default("")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rooms      Room[]
+  complaints Complaint[]
+
+  @@index([tenantId])
+  @@map("hostels")
+}
+
+enum RoomType {
+  dormitory
+  shared
+  private
+}
+
+/// §25 Rooms. `occupiedBeds` (`frontend/src/features/hostel/api.ts`'s `Room.occupiedBeds`) is
+/// server-computed from active `Allocation` rows at read time, same "server owns the count" idiom
+/// as `library`'s `Book.availableCopies` — never a stored column.
+model Room {
+  id         String   @id @default(uuid())
+  tenantId   String
+  hostelId   String
+  floorLabel String   @default("")
+  roomNumber String
+  capacity   Int
+  roomType   RoomType
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  hostel      Hostel       @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  allocations Allocation[]
+
+  @@unique([tenantId, hostelId, roomNumber])
+  @@index([tenantId])
+  @@index([hostelId])
+  @@map("hostel_rooms")
+}
+
+enum AllocationStatus {
+  active
+  vacated
+}
+
+/// §25 Room allocation — one row per stay, not overwritten on reassignment (`reassignAllocation`
+/// updates `roomId`/`bedNumber` in place on the *same* row, so a resident keeps one allocation
+/// history entry per continuous stay; `vacateAllocation` closes it out rather than deleting it, so
+/// `ResidentsTable`'s history and any later occupancy audit stay intact). `studentLabel` is never
+/// client-supplied (`api.ts`'s `createAllocation` payload deliberately carries only `{ studentId,
+/// roomId, bedNumber }`, dropping `AllocationFormValues.studentLabel` before the request even goes
+/// out) — always resolved live from the real `Student` row, same discipline `VehiclesService`/
+/// `RoutesService` already apply to every other real-entity reference in this schema.
+/// `allocatedAt`/`vacatedAt` are date-only (`@db.Date`), not full timestamps — matches this
+/// schema's own `Loan.issuedAt`/`.returnedAt` precedent for a "since when" resident-facing date
+/// where day granularity is what actually gets displayed (`ResidentsTable`'s "Since" column).
+model Allocation {
+  id          String           @id @default(uuid())
+  tenantId    String
+  studentId   String
+  roomId      String
+  bedNumber   Int
+  allocatedAt DateTime         @default(now()) @db.Date
+  vacatedAt   DateTime?        @db.Date
+  status      AllocationStatus @default(active)
+  createdAt   DateTime         @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([roomId])
+  @@index([studentId])
+  @@map("hostel_allocations")
+}
+
+/// §25 Visitor log. Unlike `Allocation.studentLabel` above, `residentLabel` genuinely is
+/// client-supplied here — `api.ts`'s `checkInVisitor` posts the whole `VisitorFormValues` payload
+/// unmodified, `residentLabel` included (`VisitorForm`'s own search-and-pick result) — same
+/// denormalized-snapshot trade-off `LibraryMember.personLabel` already makes, not re-derived from
+/// `Student` on every read. `residentStudentId` is still validated against a real `Student` row at
+/// write time (`HostelVisitorsService.assertStudentExists`), just not used to override the label.
+/// `checkInAt`/`checkOutAt` are full timestamps, not date-only — a visitor log records the actual
+/// time on the premises, not just the day (unlike `Allocation`'s day-granularity dates above). No
+/// direct `tenant Tenant` relation, same high-volume-leaf trade-off as `Loan`/`VehicleMaintenanceRecord`
+/// — created via a top-level call, so the tenant-scoping extension still stamps `tenantId` on it.
+model Visitor {
+  id                String    @id @default(uuid())
+  tenantId          String
+  residentStudentId String
+  residentLabel     String
+  visitorName       String
+  relation          String
+  purpose           String    @default("")
+  checkInAt         DateTime  @default(now())
+  checkOutAt        DateTime?
+
+  @@index([tenantId])
+  @@index([residentStudentId])
+  @@map("hostel_visitors")
+}
+
+enum ComplaintCategory {
+  maintenance
+  food
+  discipline
+  other
+}
+
+/// §25 Complaints. `status` is a plain `String`, not a Prisma enum — same reasoning as `Asset.
+/// status` above: the frontend's own literals (`schemas.ts`'s `COMPLAINT_STATUSES`) include
+/// `"in-progress"`, hyphenated, which a Prisma enum member name can't hold and `@map` would only
+/// mistranslate (see `Asset.status`'s doc comment for the fuller "caught before it shipped"
+/// story). Validated at the application layer instead (`COMPLAINT_STATUSES`/`@IsIn` in
+/// `dto/complaint.dto.ts`). `roomId`/`residentStudentId` are both nullable — a complaint about the
+/// mess hall, say, has neither (`complaintSchema`'s own comment); `residentLabel` is likewise
+/// client-supplied when present, same trade-off `Visitor.residentLabel` makes and for the same
+/// reason (`api.ts`'s `createComplaint` forwards `ComplaintFormValues` — including
+/// `residentLabel` — as-is). `hostelName`/`roomLabel` on the response, by contrast, are always
+/// resolved live server-side from the real `Hostel`/`Room` rows, never stored.
+model Complaint {
+  id                String            @id @default(uuid())
+  tenantId          String
+  hostelId          String
+  roomId            String?
+  residentStudentId String?
+  residentLabel     String?
+  category          ComplaintCategory
+  description       String
+  status            String            @default("open")
+  resolutionNotes   String?
+  createdAt         DateTime          @default(now())
+  resolvedAt        DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  hostel Hostel @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([hostelId])
+  @@map("hostel_complaints")
+}
+
+// ---------------------------------------------------------------------------
+// HR & Payroll (PRD §20/§21/§14 Employee Leave, Phase 7.6) — two model groups mirroring
+// `frontend/modules/hr-payroll.md`'s own two-folder split (`hr/`, `payroll/`): employee lifecycle
+// + leave here, salary/period/payslip below. Department/designation stay free text and leave
+// types stay a fixed four-value enum, same simplification call `hostel.md`'s room hierarchy and
+// `transport.md`'s driver-as-free-text already made (module doc "Simplifications made to fit this
+// doc's own scope").
+// ---------------------------------------------------------------------------
+
+enum EmploymentType {
+  full_time
+  part_time
+  contract
+}
+
+enum EmployeeStatus {
+  active
+  on_leave
+  resigned
+  terminated
+}
+
+/// §21 HR Management. `employeeId` is the org's own human-readable staff code (`employeeSchema`'s
+/// required field, e.g. "EMP-001") — unrelated to this row's own `id` primary key, unique per
+/// tenant same as `Teacher.employeeId`. `status` only ever moves through the three lifecycle
+/// actions below (`EmployeesService`'s own doc comment) — never a plain field edit, matching
+/// `AdmissionApplication.stage`'s "no direct write" precedent. `userId` is the `employeeId=me`
+/// self-service portal-login link, same documented-gap idiom as `Teacher.userId`/`Student.userId`
+/// (`common/identity/resolve-me.ts`'s own header comment already earmarks this field name for
+/// Phase 7.6 to add).
+///
+/// **Teacher↔employee linkage (this phase's own resolved integration task, `implementation-plan.md`
+/// Phase 7.6):** `teacherId` is the real link — an explicit, optional, unique FK to `Teacher.id`,
+/// set at employee creation for staff who are also teachers. This is deliberately *not*
+/// `Employee.id === Teacher.id` — the frontend's `TeacherProfile.tsx` (`TeacherLeaveTab`) currently
+/// assumes that equality and passes `teacher.id` straight through as `employeeId`, which this
+/// schema cannot make true in general (the two rows are independently created with independently
+/// generated uuids). That call site needs a follow-up change to resolve the linked employee id
+/// (e.g. via a `GET /hr/employees?teacherId=` lookup) instead — flagged here the same way other
+/// phases have left a cross-stack decision for frontend follow-up rather than editing that repo
+/// from here.
+model Employee {
+  id             String         @id @default(uuid())
+  tenantId       String
+  name           String
+  email          String         @default("")
+  phone          String         @default("")
+  employeeId     String
+  department     String
+  designation    String
+  employmentType EmploymentType
+  dateOfJoining  DateTime       @db.Date
+  status         EmployeeStatus @default(active)
+  teacherId      String?        @unique
+  userId         String?        @unique
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  teacher         Teacher?                 @relation(fields: [teacherId], references: [id])
+  lifecycleEvents EmployeeLifecycleEvent[]
+  leaveRequests   EmployeeLeaveRequest[]
+  leaveBalances   LeaveBalance[]
+  salaryStructure SalaryStructure?
+  payslips        Payslip[]
+
+  @@unique([tenantId, employeeId])
+  @@index([tenantId])
+  @@map("employees")
+}
+
+enum LifecycleEventType {
+  transfer
+  resignation
+  termination
+}
+
+/// §21 lifecycle history — one append-only row per action (`EmployeeHistoryTab`'s timeline), never
+/// edited or deleted; each write also flips the owning `Employee.status` in the same transaction
+/// (`EmployeesService.recordLifecycleAction`'s own doc comment). `newDepartment`/`newDesignation`
+/// only apply to `transfer`, same shared-shape/type-switched trade-off
+/// `lifecycleActionSchema`'s `.refine()` pair already makes client-side.
+model EmployeeLifecycleEvent {
+  id             String             @id @default(uuid())
+  tenantId       String
+  employeeId     String
+  type           LifecycleEventType
+  effectiveDate  DateTime           @db.Date
+  reason         String
+  newDepartment  String?
+  newDesignation String?
+  recordedAt     DateTime           @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([employeeId])
+  @@map("employee_lifecycle_events")
+}
+
+enum EmployeeLeaveType {
+  casual
+  sick
+  annual
+  unpaid
+}
+
+enum EmployeeLeaveStatus {
+  pending
+  approved
+  rejected
+}
+
+/// §14 Employee Leave — mirrors student `LeaveRequest` above (own model, own table: the two
+/// domains never share rows, only the shape) with an added `leaveType`, since staff balances split
+/// by type where student leave doesn't. `reviewedByUserId`/`.Label` are the same denormalized
+/// actor snapshot `LeaveRequest`/`DocumentVersion` already use.
+model EmployeeLeaveRequest {
+  id               String              @id @default(uuid())
+  tenantId         String
+  employeeId       String
+  leaveType        EmployeeLeaveType
+  startDate        DateTime            @db.Date
+  endDate          DateTime            @db.Date
+  reason           String
+  status           EmployeeLeaveStatus @default(pending)
+  reviewedByUserId String?
+  reviewedByLabel  String?
+  reviewNotes      String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([employeeId])
+  @@index([status])
+  @@map("employee_leave_requests")
+}
+
+/// §14 per-employee, per-type balance — `getLeaveBalances`'s `{ leaveType, allotted, used }[]`.
+/// One row per `(employee, leaveType)`, seeded with a fixed default allotment for all four types
+/// when the employee is created (`EmployeesService.create`'s own doc comment — same "fixed list,
+/// not configurable" call the leave-type enum above already makes); `used` increments by the
+/// requested leave's business-day span the moment a request is approved (`EmployeeLeaveService.
+/// review`), never recomputed from history on read.
+model LeaveBalance {
+  id         String            @id @default(uuid())
+  tenantId   String
+  employeeId String
+  leaveType  EmployeeLeaveType
+  allotted   Int
+  used       Int               @default(0)
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, employeeId, leaveType])
+  @@index([tenantId])
+  @@index([employeeId])
+  @@map("leave_balances")
+}
+
+/// §20 Salary structure config — the only payroll math the frontend itself ever owns is capturing
+/// these fixed inputs (`SalaryStructureForm`); the payslip breakdown is computed entirely from
+/// this row plus overtime/bonus/absence inputs at run time (`payroll-calc.ts`), never previewed
+/// client-side (module doc "Simplifications made to fit this doc's own scope"). One row per
+/// employee — `@unique` on `employeeId`, not its own `id`-keyed list, matching `GET/PUT
+/// /payroll/salary-structures/:employeeId`'s single-resource contract exactly.
+model SalaryStructure {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  employeeId         String   @unique
+  basicSalary        Float
+  housingAllowance   Float    @default(0)
+  transportAllowance Float    @default(0)
+  otherAllowance     Float    @default(0)
+  taxDeduction       Float    @default(0)
+  loanDeduction      Float    @default(0)
+  otherDeduction     Float    @default(0)
+  updatedAt          DateTime @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("salary_structures")
+}
+
+enum PayrollPeriodStatus {
+  draft
+  generated
+  approved
+}
+
+/// §20 Payroll period — `draft → generated → approved`, mirroring `examinations.md`'s marks-entry
+/// → results → publish gate (module doc "Payroll period management, run trigger, payslip
+/// generation"). `run` (draft → generated) creates one `Payslip` per active `Employee` with a
+/// `SalaryStructure`; `approve` (generated → approved) is the publish gate — payslips become
+/// visible to each employee's own self-service view only once approved (`PayslipsService.list`'s
+/// own doc comment), matching `results.publish`'s lock-after-publish semantics referenced above.
+model PayrollPeriod {
+  id        String              @id @default(uuid())
+  tenantId  String
+  label     String
+  startDate DateTime            @db.Date
+  endDate   DateTime            @db.Date
+  status    PayrollPeriodStatus @default(draft)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payslips Payslip[]
+
+  @@index([tenantId])
+  @@map("payroll_periods")
+}
+
+/// §20 Payslip — one row per `(period, employee)` generated by `POST /payroll/periods/:id/run`,
+/// never edited afterward (a correction re-runs the whole period, same all-or-nothing regeneration
+/// `InvoicesService`'s own generation step uses — there is no single-payslip edit endpoint in this
+/// contract). Every field below is the PRD §20 formula's own line item, computed server-side once
+/// at generation time (`payroll-calc.ts`) and only ever displayed afterward — `netPay` is stored,
+/// not recomputed on read, so a later `SalaryStructure` edit never silently changes a past payslip.
+model Payslip {
+  id               String   @id @default(uuid())
+  tenantId         String
+  periodId         String
+  employeeId       String
+  basicSalary      Float
+  allowances       Float
+  overtime         Float    @default(0)
+  bonus            Float    @default(0)
+  tax              Float
+  deductions       Float
+  absenceDeduction Float    @default(0)
+  loanDeduction    Float
+  netPay           Float
+  generatedAt      DateTime @default(now())
+
+  period   PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  employee Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([periodId, employeeId])
+  @@index([tenantId])
+  @@index([periodId])
+  @@index([employeeId])
+  @@map("payslips")
+}
+
+// ---------------------------------------------------------------------------
+// Communication (PRD §28 Communication, §29 Events & Calendar, §30 Parent-Teacher Meetings,
+// Phase 7.7) — `frontend/modules/communication.md`'s five sub-areas: notifications, internal
+// messaging, announcements, events/calendar, PTM. `userId`/`senderId`/`bookedByUserId` below are
+// plain scoped columns with no Prisma relation to `User`, same "no back-relation from a feature
+// model to `User`" convention every earlier phase's own self-service field already uses
+// (`Employee.userId`, `Teacher.userId`, `Student.userId`, `Parent.userId`).
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  attendance
+  homework
+  exam
+  fees
+  announcement
+  message
+  ptm
+  library
+  system
+}
+
+enum NotificationChannel {
+  inApp
+  email
+  sms
+  whatsapp
+}
+
+/// §28/§36 in-app notification center — `NotificationBell`/`NotificationList`'s own feed.
+/// `NotificationsService` writes these directly from this module's own messaging/PTM flows (module
+/// doc "Backend dependencies": "this module is just the inbox UI ... never the delivery
+/// infrastructure" — §36's actual push/email/SMS/WhatsApp fan-out across every *other* module's own
+/// mutations is out of this phase's scope, left for a background-worker follow-up same as that
+/// doc's own "Real-time delivery ... deferred" note). No `tenant Tenant @relation` here — same
+/// high-volume-leaf-table trade-off `ExamMark`/`AttendanceRecord` already make, plain scoped
+/// `tenantId` column only.
+model Notification {
+  id        String           @id @default(uuid())
+  tenantId  String
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  linkHref  String?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([tenantId])
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+/// One row per `(user, type)` — a type with no row yet defaults to `[inApp]` at read time
+/// (`NotificationsService.getPreferences`'s own doc comment), same "always return every value,
+/// default the missing ones" idiom `LeaveBalance`'s per-type rows already use.
+model NotificationPreference {
+  id       String                @id @default(uuid())
+  tenantId String
+  userId   String
+  type     NotificationType
+  channels NotificationChannel[]
+
+  @@unique([tenantId, userId, type])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("notification_preferences")
+}
+
+enum MessageRecipientType {
+  individual
+  class
+}
+
+/// §28 internal messaging — `recipientType`/`classId` are create-time audience info, stored for
+/// reference but never echoed back on the wire (the frontend's own `MessageThread` type has no such
+/// field — same "stored, not echoed" precedent `Exam.isPublished`'s own doc comment sets).
+/// `participants` is the real per-user membership/read-state; a "class" thread fans out to one
+/// `MessageParticipant` row per parent of that class at creation time (only parents with a linked
+/// portal `User` — same documented gap as `Parent.userId`), not resolved dynamically on every read.
+model MessageThread {
+  id              String               @id @default(uuid())
+  tenantId        String
+  subject         String
+  recipientType   MessageRecipientType
+  classId         String?
+  createdByUserId String
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  tenant       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  participants MessageParticipant[]
+  messages     Message[]
+
+  @@index([tenantId])
+  @@map("message_threads")
+}
+
+/// Membership + per-participant read-state — `MessageThread.unreadCount`'s own denominator
+/// (`MessagesService.toThreadResponse`'s own doc comment). `label` is a denormalized display-name
+/// snapshot taken when the participant is added (no `User` relation on this side, see this
+/// section's header comment).
+model MessageParticipant {
+  id         String    @id @default(uuid())
+  tenantId   String
+  threadId   String
+  userId     String
+  label      String
+  lastReadAt DateTime?
+
+  thread MessageThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([threadId, userId])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("message_participants")
+}
+
+/// One row per message. `readAt` on the frontend's own `Message` type is always `null` here —
+/// per-message read receipts are explicitly triaged out of this phase (module doc "Messaging");
+/// only the thread-level `unreadCount` (derived from `MessageParticipant.lastReadAt`) is real.
+model Message {
+  id          String   @id @default(uuid())
+  tenantId    String
+  threadId    String
+  senderId    String
+  senderLabel String
+  body        String
+  createdAt   DateTime @default(now())
+
+  thread MessageThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([threadId])
+  @@map("messages")
+}
+
+enum AnnouncementAudience {
+  school
+  class
+}
+
+/// §28 broadcast announcements — `classIds` is a plain scalar array for a "class" audience, same
+/// `Homework.classIds` convention (module doc: "individual" audience isn't built — message someone
+/// instead). No route-level read-scoping by the caller's own class: every recipient sees every
+/// tenant-wide announcement, matching the built contract's `GET /announcements` taking no student/
+/// class filter param.
+model Announcement {
+  id              String               @id @default(uuid())
+  tenantId        String
+  title           String
+  body            String
+  audience        AnnouncementAudience
+  classIds        String[]
+  pinned          Boolean              @default(false)
+  createdByUserId String
+  createdByLabel  String
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("announcements")
+}
+
+/// `EVENT_TYPES`'s own hyphenated members (`sports-day`/`annual-function`/`field-trip`) aren't
+/// valid Prisma enum identifiers — `sports_day`/`annual_function`/`field_trip` here, translated at
+/// the response-DTO boundary (`EventsService`'s own doc comment), same kind of wire-vs-storage
+/// translation `parseDateOnly`/`formatDateOnly` already do for dates.
+enum EventType {
+  holiday
+  exam
+  ptm
+  sports_day
+  annual_function
+  field_trip
+  meeting
+  other
+}
+
+enum EventAudience {
+  school
+  class
+}
+
+/// §29 school calendar — only manually-created entries live in this table; the `holiday`/`exam`
+/// rows `GET /events` also returns are synthesized at read time from `Holiday`/`Exam` (flagged
+/// `isExternal`, module doc "Calendar view ... aggregating") and are never written here, so
+/// `EventsService` never needs to special-case them on `PATCH`/`DELETE` — a synthetic id simply
+/// doesn't match a real row here (`EventsService`'s own doc comment).
+model Event {
+  id          String        @id @default(uuid())
+  tenantId    String
+  title       String
+  type        EventType
+  date        DateTime      @db.Date
+  startTime   String        @default("")
+  endTime     String        @default("")
+  location    String        @default("")
+  description String        @default("")
+  audience    EventAudience
+  classIds    String[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([date])
+  @@map("events")
+}
+
+/// §30 Parent-Teacher Meetings — a slot and its booking are the same row (module doc: "not two
+/// entities"). `teacherId` is the real `Teacher.id` (`PtmBookingFlow`'s own `useTeachersQuery`
+/// lookup sends that); `PtmSlotManager`'s own read-side `teacherId: session.user.id` is a known
+/// frontend mismatch flagged in `../implementation-plan.md`'s Phase 7.7 section, not something this
+/// schema works around. `bookedByUserId`/`bookedByLabel` are named `bookedByParentId`/
+/// `bookedByParentLabel` on the wire (`PtmSlot`'s own frontend type) even though a Student session
+/// can also book their own meeting (`PtmBookingFlow`'s own doc comment) — same "field name predates
+/// a since-broadened assumption" precedent `Employee.teacherId`'s own doc comment already sets.
+model PtmSlot {
+  id             String   @id @default(uuid())
+  tenantId       String
+  teacherId      String
+  date           DateTime @db.Date
+  startTime      String
+  endTime        String
+  bookedByUserId String?
+  bookedByLabel  String?
+  studentId      String?
+  studentLabel   String?
+  notes          String   @default("")
+  followUpAction String   @default("")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  teacher Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([teacherId])
+  @@index([bookedByUserId])
+  @@map("ptm_slots")
+}
+
+// ---------------------------------------------------------------------------
 // Audit (PRD §43)
 // ---------------------------------------------------------------------------
 
@@ -1273,4 +2483,183 @@ model AuditLog {
   @@index([tenantId, entityType, entityId])
   @@index([tenantId, createdAt])
   @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Platform Console (PRD §53/§54, Phase 7.9) — Super Admin only, genuinely cross-tenant.
+// ---------------------------------------------------------------------------
+//
+// None of the five models below are in `common/prisma/tenant-scoped-models.ts`'s
+// `TENANT_SCOPED_MODELS` — deliberately: `platform/` is the one module allowed to read across
+// every tenant at once (PRD §54), through `PlatformPrismaService` (`platform-prisma.service.ts`'s
+// own doc comment already reserved this as its second sanctioned call site), never the
+// tenant-scoped `PrismaService`. Adding these to `TENANT_SCOPED_MODELS` would be actively wrong,
+// not just unnecessary — every read here needs to see rows across tenants, not just one.
+
+/// PRD §53's three tiers — a fixed, seeded catalog (`prisma/seed.ts`), not a tenant-defined
+/// custom-plan builder (`frontend/src/features/platform/schemas.ts`'s own comment: "schema
+/// doesn't model creating/deleting a tier, only editing one's price/limits/feature list").
+/// Uppercase members, lowercased at the API boundary (`platform/platform.mappers.ts`'s
+/// `lowerEnum`) — the same enum-vs-frontend-lowercase-literal-union gap `TenantStatus` already
+/// had since Phase 0, unexercised by any real caller until this phase.
+enum PlanTier {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+model Plan {
+  id            String   @id @default(uuid())
+  tier          PlanTier @unique
+  name          String
+  /// Dollars, not cents — matches `Invoice.totalAmount`/payroll's own `Float` money convention
+  /// elsewhere in this schema, not a new one introduced here.
+  priceMonthly  Float
+  maxBranches   Int
+  maxStudents   Int
+  features      String[]
+  /// Null under `LocalBillingProvider` — `StripeBillingProvider` needs a real Stripe Price id to
+  /// create a subscription against; `platform/billing-provider.ts` throws a clear config error
+  /// (not a confusing Stripe API error) if Stripe is configured but a plan is missing this.
+  stripePriceId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+/// One active subscription per tenant (`@@unique` on `tenantId`) — PRD §53 and the frontend's own
+/// `Subscription` type (one row per tenant in `SubscriptionTable`) don't model a tenant holding
+/// two concurrent subscriptions. `stripeCustomerId`/`stripeSubscriptionId` stay null under
+/// `LocalBillingProvider` (no `STRIPE_SECRET_KEY` configured — see `platform/billing-provider.ts`)
+/// and get populated once a real Stripe subscription backs this row.
+model Subscription {
+  id                   String             @id @default(uuid())
+  tenantId             String             @unique
+  planId               String
+  status               SubscriptionStatus @default(TRIALING)
+  currentPeriodStart   DateTime
+  currentPeriodEnd     DateTime
+  trialEndsAt          DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  stripeCustomerId     String?
+  /// `@unique` (nullable, same "Postgres allows multiple NULLs" reasoning as `BillingRecord.
+  /// providerInvoiceId`) — `billing.service.ts`'s webhook handler looks a `Subscription` up by
+  /// this id on every `customer.subscription.*`/`invoice.*` event; Stripe's own id is already
+  /// globally unique, so this is just letting Prisma's `findUnique` use it directly instead of a
+  /// `findFirst` scan.
+  stripeSubscriptionId String?            @unique
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan           Plan            @relation(fields: [planId], references: [id])
+  billingRecords BillingRecord[]
+
+  @@map("subscriptions")
+}
+
+enum BillingRecordStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+/// One row per billing period/invoice (§53). `providerInvoiceId`/`invoiceUrl` stay null under
+/// `LocalBillingProvider`, populated from a real Stripe invoice once one exists
+/// (`platform/billing-provider.ts`).
+model BillingRecord {
+  id                String              @id @default(uuid())
+  tenantId          String
+  subscriptionId    String
+  periodLabel       String
+  amount            Float
+  status            BillingRecordStatus @default(PENDING)
+  issuedAt          DateTime
+  paidAt            DateTime?
+  /// `@unique` (nullable — Postgres allows multiple NULLs under a unique index, so every
+  /// `LocalBillingProvider`-created row coexists fine) so `billing.service.ts`'s webhook handler
+  /// can `upsert` on it — Stripe redelivers webhook events on any non-2xx response, and an
+  /// invoice's own id is the natural idempotency key for "have I already recorded this one."
+  providerInvoiceId String?             @unique
+  invoiceUrl        String?
+  createdAt         DateTime            @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("billing_records")
+}
+
+enum FeatureFlagScope {
+  PLATFORM
+  TENANT
+}
+
+/// `frontend/src/features/platform/api.ts`'s flat `FeatureFlag` shape covers both a platform-wide
+/// default (`scope: PLATFORM`, `tenantId: null`) and one specific tenant's override
+/// (`scope: TENANT`) in the same list — intended (not yet built) semantics: a `TENANT` row should
+/// win over the `PLATFORM` row with the same `key` for that one tenant. No feature-owning module
+/// (e.g. `hostel/`'s own "not every tenant is a boarding school" gating question — see
+/// `../implementation-plan.md`'s Phase 7.5 notes) actually *reads* this table yet to gate its own
+/// behavior — this phase only builds the Super Admin console side (list/toggle); wiring a real
+/// consumer, and the "`TENANT` wins over `PLATFORM`" resolution that implies, is that consumer's
+/// own future work, not guessed at here. Self-service flag *creation* isn't built either
+/// (`platform-console.md`'s own "Open questions" note) — the catalog of `key`s is fixed by
+/// `prisma/seed.ts`; only `enabled` is mutable via `PATCH /platform/feature-flags/:id`.
+model FeatureFlag {
+  id          String           @id @default(uuid())
+  key         String
+  label       String
+  description String
+  scope       FeatureFlagScope
+  /// Set only when `scope = TENANT`. Plain fields, no relation — same "denormalized, survives the
+  /// referenced row's own lifecycle" reasoning `AuditLog.actorUserId` already documents: an
+  /// override should never silently cascade-vanish if the tenant were ever hard-deleted, and the
+  /// resolver reads `tenantName` directly rather than joining `Tenant`/`School` on every request.
+  tenantId    String?
+  tenantName  String?
+  enabled     Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  /// Real uniqueness for a `TENANT`-scoped row (`tenantId` non-null there); for a `PLATFORM` row
+  /// (`tenantId: null`) this index does *not* actually stop a second row for the same `key` —
+  /// Postgres treats every `NULL` in a unique index as distinct from every other, so two rows with
+  /// `key: 'x', tenantId: null` don't collide at the DB level. `prisma/seed.ts` is what keeps the
+  /// global catalog to one row per key in practice (`findFirst` + create-or-update, not `upsert`
+  /// on this compound key — Prisma's own generated type for that shorthand refuses a `null`
+  /// half). Worth a real partial unique index (`WHERE "tenantId" IS NULL`) if a second writer of
+  /// `PLATFORM` rows ever shows up.
+  @@unique([key, tenantId])
+  @@map("feature_flags")
+}
+
+/// PRD §54's platform-level audit trail — distinct from the tenant-scoped `AuditLog` above
+/// (`modules/platform-console.md`'s own "Backend dependencies": "distinct from a school's own
+/// §43 audit logs"). Every field is a plain denormalized snapshot at write time, not a live join —
+/// same `AuditLog.actorUserId` reasoning: a school being renamed, or a super admin account being
+/// removed, later shouldn't rewrite what this row says happened at the time.
+model PlatformAuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?
+  actorLabel  String
+  action      String
+  target      String
+  tenantId    String?
+  tenantName  String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("platform_audit_logs")
 }

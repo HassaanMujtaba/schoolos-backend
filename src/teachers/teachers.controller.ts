@@ -12,6 +12,10 @@ import {
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import {
+  CurrentUser,
+  AuthenticatedUser,
+} from '../common/decorators/current-user.decorator';
 import { ListQueryDto } from '../common/pagination/list-query.dto';
 import { TeachersService } from './teachers.service';
 import { TeacherDto } from './dto/teacher.dto';
@@ -21,11 +25,21 @@ import {
   PagedTeachersDto,
   TeacherResponseDto,
 } from './dto/teacher-response.dto';
+import { TeacherDashboardDto } from './dto/teacher-dashboard.dto';
 
 @ApiTags('teachers')
 @Controller('teachers')
 export class TeachersController {
   constructor(private readonly teachersService: TeachersService) {}
+
+  // Declared before `:id` — same reasoning as `StudentsController.export`: a literal segment
+  // ahead of the catch-all so `/teachers/me/dashboard` never gets swallowed by `GET /teachers/:id`.
+  @Get('me/dashboard')
+  getMyDashboard(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<TeacherDashboardDto> {
+    return this.teachersService.getMyDashboard(user.id);
+  }
 
   @Get()
   @RequirePermission('teachers.read')

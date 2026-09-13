@@ -46,3 +46,19 @@ export async function resolveTeacherId(
   }
   return teacher.id;
 }
+
+/** Phase 7.6 — HR & Payroll's `employeeId=me`, exactly the reuse this file's own header comment earmarked. */
+export async function resolveEmployeeId(
+  prisma: PrismaService,
+  rawEmployeeId: string,
+  currentUserId: string | null,
+): Promise<string> {
+  if (rawEmployeeId !== 'me') return rawEmployeeId;
+  const employee =
+    currentUserId &&
+    (await prisma.employee.findUnique({ where: { userId: currentUserId } }));
+  if (!employee) {
+    throw new NotFoundException('No employee profile linked to this account');
+  }
+  return employee.id;
+}

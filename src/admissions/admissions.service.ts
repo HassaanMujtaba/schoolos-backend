@@ -232,11 +232,13 @@ export class AdmissionsService {
     const admission = await this.findOrThrow(id);
     if (admission.stage !== 'enrollment') {
       throw new BadRequestException(
-        `Admission ${id} must reach the enrollment stage before enrolling (currently: ${admission.stage})`,
+        `${admission.applicantName}'s admission must reach the enrollment stage before enrolling (currently: ${admission.stage})`,
       );
     }
     if (admission.enrolledStudentId) {
-      throw new ConflictException(`Admission ${id} is already enrolled`);
+      throw new ConflictException(
+        `${admission.applicantName} is already enrolled`,
+      );
     }
     // PRD §7's order enforced as a real business rule, not just client stepper sequencing — see
     // `../../implementation-plan.md`'s resolved Phase 3 admissions↔fees ordering decision. Reaching
@@ -251,7 +253,7 @@ export class AdmissionsService {
       ))
     ) {
       throw new BadRequestException(
-        `Admission ${id}'s admission fee has not been paid yet`,
+        `${admission.applicantName}'s admission fee has not been paid yet`,
       );
     }
 
@@ -370,7 +372,7 @@ export class AdmissionsService {
 
     if (targetStage === 'fee_payment' && existing.decision !== 'accepted') {
       throw new BadRequestException(
-        `Admission ${existing.id} must be accepted before moving to fee payment`,
+        `${existing.applicantName}'s admission must be accepted before moving to fee payment`,
       );
     }
   }

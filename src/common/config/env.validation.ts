@@ -93,6 +93,20 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   FRONTEND_BASE_URL = 'http://localhost:5173';
+
+  // Phase 7.9 — Platform Console billing (PRD §53). Both optional: `platform/billing-provider.ts`
+  // falls back to `LocalBillingProvider` (a real, honestly-flagged dev stand-in — same discipline
+  // as `forgotPassword`'s dev-only reset link) whenever `STRIPE_SECRET_KEY` isn't set, rather than
+  // failing boot the way S3_* above does. Unlike storage, no route mounts unconditionally that
+  // *requires* a real billing provider to function — a deploy that never configures Stripe should
+  // still boot and serve every other module.
+  @IsString()
+  @IsOptional()
+  STRIPE_SECRET_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  STRIPE_WEBHOOK_SECRET?: string;
 }
 
 export function validateEnv(

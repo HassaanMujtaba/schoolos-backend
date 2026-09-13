@@ -52,4 +52,47 @@ export const TENANT_SCOPED_MODELS = new Set<string>([
   'Payment',
   // Phase 7.1 — Documents & Certificates (see ../../../implementation-plan.md)
   'Certificate',
+  // Phase 7.2 — Library (see ../../../implementation-plan.md)
+  'LibraryCategory',
+  'LibraryShelf',
+  'Book',
+  'BookCopy',
+  'LibraryMember',
+  'Loan',
+  'Reservation',
+  'LibrarySettings',
+  // Phase 7.3 — Transport (see ../../../implementation-plan.md)
+  'Vehicle',
+  'VehicleMaintenanceRecord',
+  'Route',
+  'RouteStop',
+  // Phase 7.4 — Inventory & Assets (see ../../../implementation-plan.md)
+  'StockCategory',
+  'StockItem',
+  'StockMovement',
+  'Asset',
+  'AssetMaintenanceRecord',
+  // Phase 7.5 — Hostel (see ../../../implementation-plan.md)
+  'Hostel',
+  'Room',
+  'Allocation',
+  'Visitor',
+  'Complaint',
+  // Phase 7.6 — HR & Payroll (see ../../../implementation-plan.md)
+  'Employee',
+  'EmployeeLifecycleEvent',
+  'EmployeeLeaveRequest',
+  'LeaveBalance',
+  'SalaryStructure',
+  'PayrollPeriod',
+  'Payslip',
+  // Phase 7.7 — Communication (see ../../../implementation-plan.md)
+  'Notification',
+  'NotificationPreference',
+  'MessageThread',
+  'MessageParticipant',
+  'Message',
+  'Announcement',
+  'Event',
+  'PtmSlot',
 ]);

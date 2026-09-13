@@ -175,6 +175,30 @@ export class StudentsService {
   /** `students.export` — CSV, per `students/api.ts`'s `exportStudents` (`responseType: 'blob'`). */
   async exportCsv(query: ListStudentsQueryDto): Promise<string> {
     const { items } = await this.list({ ...query, page: 1, pageSize: 10_000 });
+    // The list table resolves `classId`/`sectionId` to names client-side
+    // (`StudentTable.tsx`'s `classNameById`/`sectionNameById`) — this export
+    // has no such luxury being generated server-side, so it needs its own
+    // lookup rather than leaking the raw ids into the CSV (same class of bug
+    // already fixed elsewhere for Admissions' `classAppliedFor`).
+    const classIds = [...new Set(items.map((s) => s.classId))];
+    const sectionIds = [...new Set(items.map((s) => s.sectionId))];
+    const [classes, sections] = await Promise.all([
+      classIds.length
+        ? this.prisma.schoolClass.findMany({
+            where: { id: { in: classIds } },
+            select: { id: true, name: true },
+          })
+        : [],
+      sectionIds.length
+        ? this.prisma.section.findMany({
+            where: { id: { in: sectionIds } },
+            select: { id: true, name: true },
+          })
+        : [],
+    ]);
+    const classNameById = new Map(classes.map((c) => [c.id, c.name]));
+    const sectionNameById = new Map(sections.map((s) => [s.id, s.name]));
+
     const header = [
       'Admission Number',
       'Name',
@@ -188,8 +212,8 @@ export class StudentsService {
       [
         s.admissionNumber,
         s.name,
-        s.classId,
-        s.sectionId,
+        classNameById.get(s.classId) ?? 'Unknown class',
+        sectionNameById.get(s.sectionId) ?? 'Unknown section',
         s.status,
         s.dob,
         s.gender,
