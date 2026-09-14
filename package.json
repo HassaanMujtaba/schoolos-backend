@@ -29,7 +29,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
     "prisma:studio": "prisma studio",
-    "bonto:start": "npx --yes prisma generate && npx --yes prisma migrate deploy && npx --yes @nestjs/cli start"
+    "bonto:start": "npx --yes prisma@6 generate && npx --yes prisma@6 migrate deploy && npx --yes @nestjs/cli@11 start"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",
