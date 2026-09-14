@@ -29,11 +29,12 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
     "prisma:studio": "prisma studio",
-    "bonto:start": "npx --yes prisma@6 generate && npx --yes prisma@6 migrate deploy && npx --yes @nestjs/cli@11 start"
+    "bonto:start": "prisma generate && prisma migrate deploy && nest start"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1127.0",
     "@aws-sdk/s3-request-presigner": "^3.1127.0",
+    "@nestjs/cli": "^11.0.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.0",
@@ -59,13 +60,14 @@
     "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "prisma": "^6.3.0",
     "socket.io": "^4.8.3",
     "stripe": "^22.6.2",
+    "typescript": "~6.0.2",
     "uuid": "^11.0.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.19.0",
-    "@nestjs/cli": "^11.0.0",
     "@nestjs/schematics": "^11.0.0",
     "@nestjs/testing": "^11.0.0",
     "@secretlint/secretlint-rule-preset-recommend": "^9.0.0",
@@ -87,12 +89,10 @@
     "husky": "^9.1.7",
     "lint-staged": "^15.4.3",
     "prettier": "^3.9.6",
-    "prisma": "^6.3.0",
     "secretlint": "^9.0.0",
     "source-map-support": "^0.5.21",
     "supertest": "^7.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "~6.0.2",
     "typescript-eslint": "^8.69.0",
     "vitest": "^5.0.0"
   },
