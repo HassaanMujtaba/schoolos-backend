@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { AppModule } from '../src/app.module';
 import { HttpExceptionFilter } from '../src/common/filters/http-exception.filter';
 import { PlatformPrismaService } from '../src/common/prisma/platform-prisma.service';
+import { addOneMonthPkt } from '../src/common/dates/pkt-time';
 
 function body<T>(res: request.Response): T {
   return res.body as T;
@@ -37,10 +38,10 @@ const ALL_PLATFORM_PERMISSIONS = [
  * instead this proves the opposite: a caller with the right `platform.*` permission legitimately
  * sees data spanning every tenant, gated on permission alone.
  *
- * `Plan`/`FeatureFlag` are global catalogs `prisma/seed.ts` seeds once for the whole database, not
- * per-test fixtures — every test that mutates one restores it in the same `it()` block rather than
- * `afterAll`, so a failing assertion mid-test doesn't leave the seeded catalog corrupted for every
- * other e2e spec sharing this same database.
+ * `FeatureFlag`/`PlatformSettings` are global rows `prisma/seed.ts` seeds once for the whole
+ * database, not per-test fixtures — every test that mutates one restores it in the same `it()`
+ * block rather than `afterAll`, so a failing assertion mid-test doesn't leave shared state
+ * corrupted for every other e2e spec sharing this same database.
  */
 describe('Platform Console (e2e)', () => {
   let app: INestApplication<App>;
@@ -192,7 +193,7 @@ describe('Platform Console (e2e)', () => {
   });
 
   describe('school onboarding', () => {
-    it('POST /platform/schools provisions a tenant, school, trial subscription, first billing record, an INVITED owner, and an audit row — end to end', async () => {
+    it('POST /platform/schools provisions a tenant, school, subscription at the negotiated PKR price, first billing record, an INVITED owner, and an audit row — end to end', async () => {
       const warnSpy = vi.spyOn(Logger.prototype, 'warn');
 
       const createRes = await request(app.getHttpServer())
@@ -201,20 +202,20 @@ describe('Platform Console (e2e)', () => {
         .send({
           name: `Sunrise Academy ${randomUUID()}`,
           contactEmail: `admin-${randomUUID()}@sunrise.test`,
-          plan: 'professional',
+          monthlyAmount: 15000,
         });
       expect(createRes.status).toBe(201);
       const school = body<{
         id: string;
         name: string;
         status: string;
-        plan: string;
+        monthlyAmount: number;
         branchCount: number;
         userCount: number;
         studentCount: number;
       }>(createRes);
-      expect(school.status).toBe('trial');
-      expect(school.plan).toBe('professional');
+      expect(school.status).toBe('active');
+      expect(school.monthlyAmount).toBe(15000);
       expect(school.branchCount).toBe(0);
       expect(school.userCount).toBe(1);
       onboardedTenantId = school.id;
@@ -229,17 +230,16 @@ describe('Platform Console (e2e)', () => {
         .send({ identifier: owner.email, password: 'whatever' });
       expect(blockedLogin.status).toBe(401);
 
-      // The subscription: trialing, tied to the right plan, with a real first billing record.
+      // The subscription: active at the negotiated price, with a real first billing record.
       const subscription = await prisma.subscription.findUniqueOrThrow({
         where: { tenantId: onboardedTenantId },
-        include: { plan: true },
       });
-      expect(subscription.status).toBe('TRIALING');
-      expect(subscription.plan.tier).toBe('PROFESSIONAL');
+      expect(subscription.status).toBe('ACTIVE');
+      expect(subscription.monthlyAmount).toBe(15000);
       const billingRecord = await prisma.billingRecord.findFirstOrThrow({
         where: { subscriptionId: subscription.id },
       });
-      expect(billingRecord.amount).toBe(subscription.plan.priceMonthly);
+      expect(billingRecord.amount).toBe(subscription.monthlyAmount);
       expect(billingRecord.status).toBe('PENDING');
 
       // A platform audit row was written for this action (PlatformAuditLogService, not the
@@ -251,17 +251,19 @@ describe('Platform Console (e2e)', () => {
       expect(auditRow.tenantName).toBe(school.name);
       expect(auditRow.actorLabel).not.toBe('');
 
-      // The dev-only invite token AuthService.issueInviteToken logs (same pattern
-      // auth.e2e-spec.ts's own forgot-password test uses) actually redeems and activates the
-      // account — this is the one path that makes onboarding a school not a dead end.
+      // The dev-only invite email MailerService logs (no SMTP configured in this test
+      // environment — same pattern auth.e2e-spec.ts's own forgot-password test uses) actually
+      // redeems and activates the account — this is the one path that makes onboarding a school
+      // not a dead end.
       const logged = warnSpy.mock.calls
         .map((call) => String(call[0]))
         .find(
           (msg) =>
-            msg.includes('Invite issued for user') && msg.includes(owner.id),
+            msg.includes('Welcome to SchoolOS') && msg.includes(owner.email),
         );
       expect(logged).toBeDefined();
-      const token = logged!.split('token: ')[1];
+      const token = logged!.match(/token=([^"&\s]+)/)?.[1];
+      expect(token).toBeDefined();
       warnSpy.mockRestore();
 
       const newPassword = 'a brand new owner password 123';
@@ -338,113 +340,82 @@ describe('Platform Console (e2e)', () => {
     });
   });
 
-  describe('plans', () => {
-    it('GET /platform/plans returns the three seeded tiers', async () => {
-      const res = await request(app.getHttpServer())
-        .get('/v1/platform/plans')
-        .set('Authorization', `Bearer ${adminToken}`);
-      expect(res.status).toBe(200);
-      const tiers = body<{ tier: string }[]>(res)
-        .map((p) => p.tier)
-        .sort();
-      expect(tiers).toEqual(['enterprise', 'professional', 'starter']);
-    });
-
-    it('POST /platform/plans conflicts on a tier that already exists (the three tiers are fixed, not an open catalog)', async () => {
-      const res = await request(app.getHttpServer())
-        .post('/v1/platform/plans')
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({
-          tier: 'starter',
-          name: 'Duplicate Starter',
-          priceMonthly: 1,
-          maxBranches: 1,
-          maxStudents: 1,
-          features: [],
-        });
-      expect(res.status).toBe(409);
-    });
-
-    it('PATCH /platform/plans/:id updates price/limits/features and restores them afterward (Plan is a shared global catalog, not a per-test fixture)', async () => {
-      const listed = body<
-        {
-          id: string;
-          tier: string;
-          priceMonthly: number;
-          maxBranches: number;
-          maxStudents: number;
-          features: string[];
-        }[]
-      >(
-        await request(app.getHttpServer())
-          .get('/v1/platform/plans')
-          .set('Authorization', `Bearer ${adminToken}`),
-      );
-      const starter = listed.find((p) => p.tier === 'starter')!;
-
-      try {
-        const updateRes = await request(app.getHttpServer())
-          .patch(`/v1/platform/plans/${starter.id}`)
-          .set('Authorization', `Bearer ${adminToken}`)
-          .send({
-            name: starter.tier,
-            priceMonthly: 999,
-            maxBranches: 9,
-            maxStudents: 9000,
-            features: ['temp e2e feature'],
-          });
-        expect(updateRes.status).toBe(200);
-        expect(body<{ priceMonthly: number }>(updateRes).priceMonthly).toBe(
-          999,
-        );
-      } finally {
-        await request(app.getHttpServer())
-          .patch(`/v1/platform/plans/${starter.id}`)
-          .set('Authorization', `Bearer ${adminToken}`)
-          .send({
-            name: 'Starter',
-            priceMonthly: starter.priceMonthly,
-            maxBranches: starter.maxBranches,
-            maxStudents: starter.maxStudents,
-            features: starter.features,
-          });
-      }
-    });
-  });
-
   describe('subscriptions & billing', () => {
-    it('GET /platform/subscriptions shows the onboarded school trialing with $0 MRR (a trial contributes no recurring revenue)', async () => {
+    it('GET /platform/subscriptions shows the onboarded school active at its negotiated price', async () => {
       const res = await request(app.getHttpServer())
         .get('/v1/platform/subscriptions')
         .query({ page: 1, pageSize: 50 })
         .set('Authorization', `Bearer ${adminToken}`);
       expect(res.status).toBe(200);
-      const row = body<{
-        items: { tenantId: string; status: string; mrr: number }[];
-      }>(res).items.find((s) => s.tenantId === onboardedTenantId);
-      expect(row?.status).toBe('trialing');
-      expect(row?.mrr).toBe(0);
-    });
-
-    it('an ACTIVE subscription contributes its plan price to MRR', async () => {
-      await prisma.subscription.update({
-        where: { tenantId: onboardedTenantId },
-        data: { status: 'ACTIVE', trialEndsAt: null },
-      });
-      const res = await request(app.getHttpServer())
-        .get('/v1/platform/subscriptions')
-        .query({ page: 1, pageSize: 50 })
-        .set('Authorization', `Bearer ${adminToken}`);
       const row = body<{
         items: {
           tenantId: string;
           status: string;
           mrr: number;
-          plan: string;
+          monthlyAmount: number;
         }[];
       }>(res).items.find((s) => s.tenantId === onboardedTenantId);
       expect(row?.status).toBe('active');
-      expect(row?.mrr).toBeGreaterThan(0);
+      expect(row?.monthlyAmount).toBe(15000);
+      expect(row?.mrr).toBe(15000);
+    });
+
+    it('PATCH /platform/subscriptions/:id renegotiates the monthly price', async () => {
+      const subscription = await prisma.subscription.findUniqueOrThrow({
+        where: { tenantId: onboardedTenantId },
+      });
+      const res = await request(app.getHttpServer())
+        .patch(`/v1/platform/subscriptions/${subscription.id}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ monthlyAmount: 20000 });
+      expect(res.status).toBe(200);
+      expect(body<{ monthlyAmount: number }>(res).monthlyAmount).toBe(20000);
+    });
+
+    it('POST /platform/subscriptions/:id/confirm-payment renews from the original currentPeriodEnd, not from today — the grace window never shifts the next period', async () => {
+      const subscription = await prisma.subscription.findUniqueOrThrow({
+        where: { tenantId: onboardedTenantId },
+      });
+      const originalPeriodEnd = subscription.currentPeriodEnd;
+      const expectedNextPeriodEnd = addOneMonthPkt(originalPeriodEnd);
+
+      // Simulate the period having already lapsed and sat in its grace window for a few days —
+      // confirming payment "late" must still renew from the *original* expiry.
+      await prisma.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          status: 'GRACE',
+          graceEndsAt: new Date(originalPeriodEnd.getTime() + 5 * 86_400_000),
+        },
+      });
+
+      const res = await request(app.getHttpServer())
+        .post(`/v1/platform/subscriptions/${subscription.id}/confirm-payment`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ note: 'Received via bank transfer' });
+      expect(res.status).toBe(200);
+      const updated = body<{
+        status: string;
+        currentPeriodEnd: string;
+        graceEndsAt: string | null;
+      }>(res);
+      expect(updated.status).toBe('active');
+      expect(updated.graceEndsAt).toBeNull();
+      expect(new Date(updated.currentPeriodEnd).toISOString()).toBe(
+        expectedNextPeriodEnd.toISOString(),
+      );
+
+      const paidRecord = await prisma.billingRecord.findFirstOrThrow({
+        where: { subscriptionId: subscription.id, status: 'PAID' },
+      });
+      expect(paidRecord.confirmedByName).toBeTruthy();
+      expect(paidRecord.note).toBe('Received via bank transfer');
+
+      // A new PENDING record for the next period now exists too.
+      const pendingRecords = await prisma.billingRecord.count({
+        where: { subscriptionId: subscription.id, status: 'PENDING' },
+      });
+      expect(pendingRecords).toBe(1);
     });
 
     it('PATCH /platform/subscriptions/:id cancels — status becomes canceled and MRR drops back to $0', async () => {
@@ -454,21 +425,21 @@ describe('Platform Console (e2e)', () => {
       const res = await request(app.getHttpServer())
         .patch(`/v1/platform/subscriptions/${subscription.id}`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ cancelAtPeriodEnd: true });
+        .send({ cancel: true });
       expect(res.status).toBe(200);
       const updated = body<{ status: string; mrr: number }>(res);
       expect(updated.status).toBe('canceled');
       expect(updated.mrr).toBe(0);
     });
 
-    it('rejects changing plan and canceling in the same request as ambiguous', async () => {
+    it('rejects changing price and canceling in the same request as ambiguous', async () => {
       const subscription = await prisma.subscription.findUniqueOrThrow({
         where: { tenantId: onboardedTenantId },
       });
       const res = await request(app.getHttpServer())
         .patch(`/v1/platform/subscriptions/${subscription.id}`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ plan: 'enterprise', cancelAtPeriodEnd: true });
+        .send({ monthlyAmount: 25000, cancel: true });
       expect(res.status).toBe(400);
     });
 
@@ -478,19 +449,39 @@ describe('Platform Console (e2e)', () => {
         .query({ page: 1, pageSize: 50 })
         .set('Authorization', `Bearer ${billingReadToken}`);
       expect(res.status).toBe(200);
-      const row = body<{ items: { tenantId: string; status: string }[] }>(
+      const rows = body<{ items: { tenantId: string; status: string }[] }>(
         res,
-      ).items.find((r) => r.tenantId === onboardedTenantId);
-      expect(row).toBeDefined();
-      expect(row?.status).toBe('pending');
+      ).items.filter((r) => r.tenantId === onboardedTenantId);
+      expect(rows.length).toBeGreaterThan(0);
     });
+  });
 
-    it("the webhook endpoint is public but refuses to process anything when Stripe isn't configured (this test environment has no STRIPE_SECRET_KEY)", async () => {
-      const res = await request(app.getHttpServer())
-        .post('/v1/platform/billing/webhook')
-        .set('stripe-signature', 't=1,v1=fake')
-        .send({ type: 'invoice.paid' });
-      expect(res.status).toBe(400);
+  describe('platform settings', () => {
+    it('GET/PATCH /platform/settings reads and updates the grace-period-days default', async () => {
+      const getRes = await request(app.getHttpServer())
+        .get('/v1/platform/settings')
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(getRes.status).toBe(200);
+      const original = body<{ subscriptionGracePeriodDays: number }>(getRes);
+
+      try {
+        const updateRes = await request(app.getHttpServer())
+          .patch('/v1/platform/settings')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({ subscriptionGracePeriodDays: 7 });
+        expect(updateRes.status).toBe(200);
+        expect(
+          body<{ subscriptionGracePeriodDays: number }>(updateRes)
+            .subscriptionGracePeriodDays,
+        ).toBe(7);
+      } finally {
+        await request(app.getHttpServer())
+          .patch('/v1/platform/settings')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({
+            subscriptionGracePeriodDays: original.subscriptionGracePeriodDays,
+          });
+      }
     });
   });
 

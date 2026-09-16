@@ -118,7 +118,13 @@ describe('Auth (e2e)', () => {
       activeBranchId: null,
     });
     expect(login.roles).toEqual(['school_admin']);
-    expect(login.permissions).toEqual([]); // seed.ts grants school_admin zero permissions by design
+    // seed.ts grants school_admin every non-platform permission (same as school_owner) — asserted
+    // by shape rather than the full ~100-entry list, so this doesn't need editing every time the
+    // permission catalog grows.
+    expect(login.permissions.length).toBeGreaterThan(0);
+    expect(login.permissions.every((p) => !p.startsWith('platform.'))).toBe(
+      true,
+    );
 
     const setCookie = loginRes.headers['set-cookie'];
     expect(setCookie?.[0]).toMatch(/^refresh_token=/);
@@ -234,9 +240,10 @@ describe('Auth (e2e)', () => {
       .send({ identifier: email, password });
     expect(loginRes.status).toBe(200);
 
-    // The real delivery channel (PRD §36's notification worker) doesn't exist yet — AuthService
-    // logs the token as a documented dev stand-in (see its own doc comment); capture it the same
-    // way an operator reading logs would, rather than reaching into Redis/AuthService internals.
+    // No SMTP configured in this test environment — MailerService logs the email body (with the
+    // reset link's `token=...` query param) as a documented dev stand-in (see its own doc
+    // comment); capture it the same way an operator reading logs would, rather than reaching into
+    // Redis/AuthService internals.
     const warnSpy = vi.spyOn(Logger.prototype, 'warn');
     const forgotRes = await request(app.getHttpServer())
       .post('/v1/auth/forgot-password')
@@ -245,9 +252,10 @@ describe('Auth (e2e)', () => {
 
     const logged = warnSpy.mock.calls
       .map((call) => String(call[0]))
-      .find((msg) => msg.includes('token:'));
+      .find((msg) => msg.includes('Reset your SchoolOS password'));
     expect(logged).toBeDefined();
-    const token = logged!.split('token: ')[1];
+    const token = logged!.match(/token=([^"&\s]+)/)?.[1];
+    expect(token).toBeDefined();
     warnSpy.mockRestore();
 
     const newPassword = 'a brand new password 123';

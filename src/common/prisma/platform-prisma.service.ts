@@ -11,7 +11,7 @@ import { AppConfigService } from '../config/app-config.service';
  * deliberately *un*-extended Prisma client (no `applyTenantScoping` hook), separate from
  * `PrismaService`'s tenant-scoped one.
  *
- * Two sanctioned call sites:
+ * Three sanctioned call sites:
  * 1. `users/users.service.ts`'s auth-profile lookups, used only by `auth/`'s own pre-tenant-
  *    context reads: resolving a login identifier to a user (tenant isn't known until *after* it
  *    resolves to a row) and re-syncing a user's roles/permissions by id on refresh (the request
@@ -19,6 +19,11 @@ import { AppConfigService } from '../config/app-config.service';
  *    normal auth guard, so no per-request tenant context exists to scope through yet either).
  * 2. Phase 7.9 Platform Console (PRD §54) — the one module that legitimately reads across every
  *    tenant, gated on `platform.*` permissions rather than tenant membership.
+ * 3. `school-setup/schools/schools.service.ts`'s `getSubscriptionStatus` — `Subscription` isn't a
+ *    tenant-scoped model (schema.prisma's "Platform Console" section), so a tenant-facing read of
+ *    the caller's *own* subscription has nowhere else to go. Safe only because the `tenantId`
+ *    filter there comes from `RequestContextService`, never client input — this is not a general
+ *    license to read any other cross-tenant model from a tenant-facing route.
  *
  * Treat a new call site for this class the way `security-standards` treats `runAsPlatform()`:
  * real, unfiltered cross-tenant access, worth a second look in review — never reach for it just

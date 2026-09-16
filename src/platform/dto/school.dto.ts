@@ -3,22 +3,19 @@ import {
   IsEmail,
   IsIn,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
+  IsPositive,
   IsString,
   MaxLength,
 } from 'class-validator';
 import { PagedResult } from '../../common/pagination/list-query.dto';
 import { ListQueryDto } from '../../common/pagination/list-query.dto';
 
-/** Matches `frontend/src/features/platform/schemas.ts`'s `SCHOOL_PLANS`/`SCHOOL_STATUSES` exactly — see `platform.mappers.ts`'s `lowerEnum`/`upperEnum` for the Prisma-enum round trip. */
-export const SCHOOL_PLAN_TIERS = [
-  'starter',
-  'professional',
-  'enterprise',
-] as const;
+/** Matches `frontend/src/features/platform/schemas.ts`'s `SCHOOL_STATUSES` exactly — see `platform.mappers.ts`'s `lowerEnum`/`upperEnum` for the Prisma-enum round trip. */
 export const SCHOOL_STATUSES = ['active', 'suspended', 'trial'] as const;
 
-/** `POST /platform/schools` — `frontend/src/features/platform/schemas.ts`'s `schoolOnboardingSchema`. Deliberately minimal: provisioning a tenant, not configuring one (that module doc's own framing). */
+/** `POST /platform/schools` — `frontend/src/features/platform/schemas.ts`'s `schoolOnboardingSchema`. Deliberately minimal: provisioning a tenant, not configuring one (that module doc's own framing). `monthlyAmount` is the PKR price negotiated with this school before onboarding — see `platform/subscriptions.service.ts`. */
 export class SchoolOnboardingDto {
   @ApiProperty()
   @IsString()
@@ -31,12 +28,13 @@ export class SchoolOnboardingDto {
   @MaxLength(200)
   contactEmail!: string;
 
-  @ApiProperty({ enum: SCHOOL_PLAN_TIERS })
-  @IsIn(SCHOOL_PLAN_TIERS)
-  plan!: (typeof SCHOOL_PLAN_TIERS)[number];
+  @ApiProperty({ description: 'Negotiated monthly subscription price, in PKR' })
+  @IsNumber()
+  @IsPositive()
+  monthlyAmount!: number;
 }
 
-/** `PATCH /platform/schools/:id` — the frontend only ever sends `{ status }` (suspend/reinstate, `api.ts`'s `suspendSchool`/`reinstateSchool`), never a name/email/plan edit here (that's School Setup's own `/school` endpoint once the owner is inside their tenant). */
+/** `PATCH /platform/schools/:id` — the frontend only ever sends `{ status }` (suspend/reinstate, `api.ts`'s `suspendSchool`/`reinstateSchool`), never a name/email edit here (that's School Setup's own `/school` endpoint once the owner is inside their tenant). */
 export class UpdateSchoolStatusDto {
   @ApiProperty({ enum: SCHOOL_STATUSES })
   @IsIn(SCHOOL_STATUSES)
@@ -57,8 +55,7 @@ export class SchoolResponseDto {
   @ApiProperty() contactEmail!: string;
   @ApiProperty({ enum: SCHOOL_STATUSES })
   status!: (typeof SCHOOL_STATUSES)[number];
-  @ApiProperty({ enum: SCHOOL_PLAN_TIERS })
-  plan!: (typeof SCHOOL_PLAN_TIERS)[number];
+  @ApiProperty() monthlyAmount!: number;
   @ApiProperty() branchCount!: number;
   @ApiProperty() userCount!: number;
   @ApiProperty() studentCount!: number;

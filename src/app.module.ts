@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppConfigModule } from './common/config/app-config.module';
 import { RequestContextModule } from './common/context/request-context.module';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { RedisModule } from './common/redis/redis.module';
 import { StorageModule } from './common/storage/storage.module';
+import { MailerModule } from './common/mailer/mailer.module';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 import { AnyPermissionsGuard } from './common/guards/any-permissions.guard';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
@@ -13,6 +15,7 @@ import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { UsersModule } from './users/users.module';
+import { UserManagementModule } from './user-management/user-management.module';
 import { TenantsModule } from './tenants/tenants.module';
 import { SchoolSetupModule } from './school-setup/school-setup.module';
 import { DocumentsModule } from './documents/documents.module';
@@ -46,12 +49,15 @@ import { PlatformModule } from './platform/platform.module';
     PrismaModule,
     RedisModule,
     StorageModule,
+    MailerModule,
+    ScheduleModule.forRoot(),
     ThrottlerModule.forRoot({
       throttlers: [{ ttl: 60_000, limit: 100 }],
     }),
     HealthModule,
     UsersModule,
     AuthModule,
+    UserManagementModule,
     TenantsModule,
     SchoolSetupModule,
     // Phase 3 — People + Documents primitive. DocumentsModule mounts first: students/ and

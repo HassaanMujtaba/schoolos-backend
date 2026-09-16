@@ -1,18 +1,20 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
-  IsIn,
+  IsDateString,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
+  IsPositive,
   IsString,
+  MaxLength,
 } from 'class-validator';
 import { PagedResult } from '../../common/pagination/list-query.dto';
-import { SCHOOL_PLAN_TIERS } from './school.dto';
 
 export const SUBSCRIPTION_STATUSES = [
-  'trialing',
   'active',
-  'past_due',
+  'grace',
+  'suspended',
   'canceled',
 ] as const;
 
@@ -30,22 +32,40 @@ export class CreateSubscriptionDto {
   @IsNotEmpty()
   tenantId!: string;
 
-  @ApiProperty({ enum: SCHOOL_PLAN_TIERS })
-  @IsIn(SCHOOL_PLAN_TIERS)
-  plan!: (typeof SCHOOL_PLAN_TIERS)[number];
+  @ApiProperty({ description: 'Negotiated monthly subscription price, in PKR' })
+  @IsNumber()
+  @IsPositive()
+  monthlyAmount!: number;
 }
 
-/** `PATCH /platform/subscriptions/:id` — same "not called by the current frontend, kept for contract completeness" caveat as `CreateSubscriptionDto`. Exactly one of `plan`/`cancelAtPeriodEnd` per call — changing plan and canceling in the same request is ambiguous about ordering, so this DTO doesn't allow it rather than guessing which happens first. */
+/** `PATCH /platform/subscriptions/:id` — exactly one of `monthlyAmount`/`cancel` per call, same "ambiguous ordering" reasoning the previous plan/cancel version of this DTO gave. A price change here takes effect on the *next* renewal (`SubscriptionsService.update`), not retroactively on the period already in progress. */
 export class UpdateSubscriptionDto {
-  @ApiPropertyOptional({ enum: SCHOOL_PLAN_TIERS })
+  @ApiPropertyOptional({ description: 'Renegotiated monthly price, in PKR' })
   @IsOptional()
-  @IsIn(SCHOOL_PLAN_TIERS)
-  plan?: (typeof SCHOOL_PLAN_TIERS)[number];
+  @IsNumber()
+  @IsPositive()
+  monthlyAmount?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
-  cancelAtPeriodEnd?: boolean;
+  cancel?: boolean;
+}
+
+/** `POST /platform/subscriptions/:id/confirm-payment` — a Platform Admin manually confirming a payment received outside the platform (bank transfer, cash, etc.) for the current period's `PENDING` `BillingRecord`. Renews from the subscription's *original* `currentPeriodEnd`, never from `paidAt`. */
+export class ConfirmPaymentDto {
+  @ApiPropertyOptional({
+    description: 'Date payment was actually received; defaults to now',
+  })
+  @IsOptional()
+  @IsDateString()
+  paidAt?: string;
+
+  @ApiPropertyOptional({ description: 'e.g. "Received via bank transfer"' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
 }
 
 /** `frontend/src/features/platform/api.ts`'s `Subscription`. */
@@ -53,11 +73,11 @@ export class SubscriptionResponseDto {
   @ApiProperty() id!: string;
   @ApiProperty() tenantId!: string;
   @ApiProperty() tenantName!: string;
-  @ApiProperty({ enum: SCHOOL_PLAN_TIERS })
-  plan!: (typeof SCHOOL_PLAN_TIERS)[number];
+  @ApiProperty() monthlyAmount!: number;
   @ApiProperty({ enum: SUBSCRIPTION_STATUSES })
   status!: (typeof SUBSCRIPTION_STATUSES)[number];
   @ApiProperty() currentPeriodEnd!: string;
+  @ApiPropertyOptional() graceEndsAt?: string | null;
   @ApiProperty() mrr!: number;
 }
 

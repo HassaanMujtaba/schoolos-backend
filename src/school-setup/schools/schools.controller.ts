@@ -4,6 +4,7 @@ import { RequirePermission } from '../../common/decorators/require-permission.de
 import { SchoolsService } from './schools.service';
 import { SchoolProfileDto } from './dto/school.dto';
 import { SchoolResponseDto } from './dto/school-response.dto';
+import { SubscriptionStatusResponseDto } from './dto/subscription-status.dto';
 
 @ApiTags('schools')
 @Controller('schools')
@@ -20,5 +21,12 @@ export class SchoolsController {
   @RequirePermission('school.update')
   updateCurrent(@Body() dto: SchoolProfileDto): Promise<SchoolResponseDto> {
     return this.schoolsService.updateCurrent(dto);
+  }
+
+  /** Drives the tenant portal's subscription/grace-period banner — School Owner/Admin only (`school.billing.read`, seeded for just those two roles). */
+  @Get('current/subscription-status')
+  @RequirePermission('school.billing.read')
+  getSubscriptionStatus(): Promise<SubscriptionStatusResponseDto> {
+    return this.schoolsService.getSubscriptionStatus();
   }
 }

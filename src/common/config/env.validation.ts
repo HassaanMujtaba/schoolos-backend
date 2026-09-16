@@ -94,19 +94,31 @@ class EnvironmentVariables {
   @IsOptional()
   FRONTEND_BASE_URL = 'http://localhost:5173';
 
-  // Phase 7.9 — Platform Console billing (PRD §53). Both optional: `platform/billing-provider.ts`
-  // falls back to `LocalBillingProvider` (a real, honestly-flagged dev stand-in — same discipline
-  // as `forgotPassword`'s dev-only reset link) whenever `STRIPE_SECRET_KEY` isn't set, rather than
-  // failing boot the way S3_* above does. Unlike storage, no route mounts unconditionally that
-  // *requires* a real billing provider to function — a deploy that never configures Stripe should
-  // still boot and serve every other module.
+  // SMTP — `common/mailer/mailer.service.ts`. Optional the same way `STRIPE_SECRET_KEY` was:
+  // unset in local/CI, `MailerService` logs a `[dev-only]` line instead of sending (same
+  // discipline as `AuthService.forgotPassword`'s dev-only reset link) rather than failing boot the
+  // way S3_* above does — no route mounts unconditionally that *requires* real mail delivery to
+  // function.
   @IsString()
   @IsOptional()
-  STRIPE_SECRET_KEY?: string;
+  SMTP_HOST?: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsOptional()
+  SMTP_PORT = 587;
 
   @IsString()
   @IsOptional()
-  STRIPE_WEBHOOK_SECRET?: string;
+  SMTP_USER?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_PASS?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_FROM = 'SchoolOS <no-reply@schoolos.dev>';
 }
 
 export function validateEnv(

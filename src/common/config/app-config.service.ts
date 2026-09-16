@@ -85,15 +85,30 @@ export class AppConfigService {
     );
   }
 
-  // Phase 7.9 — Platform Console billing. See `env.validation.ts`'s own doc comment for why this
-  // pair is optional (unlike the S3_* getters above, which throw): `undefined` here just means
-  // `BillingProviderModule` wires up `LocalBillingProvider` instead of `StripeBillingProvider`.
-  get stripeSecretKey(): string | undefined {
-    return this.config.get<string>('STRIPE_SECRET_KEY');
+  // See `env.validation.ts`'s own doc comment for why every SMTP_* getter is optional (unlike the
+  // S3_* getters above, which throw): `undefined` `smtpHost` just means `MailerService` logs
+  // instead of sending.
+  get smtpHost(): string | undefined {
+    return this.config.get<string>('SMTP_HOST');
   }
 
-  get stripeWebhookSecret(): string | undefined {
-    return this.config.get<string>('STRIPE_WEBHOOK_SECRET');
+  get smtpPort(): number {
+    return this.config.get<number>('SMTP_PORT', 587);
+  }
+
+  get smtpUser(): string | undefined {
+    return this.config.get<string>('SMTP_USER');
+  }
+
+  get smtpPass(): string | undefined {
+    return this.config.get<string>('SMTP_PASS');
+  }
+
+  get smtpFrom(): string {
+    return this.config.get<string>(
+      'SMTP_FROM',
+      'SchoolOS <no-reply@schoolos.dev>',
+    );
   }
 
   private getOrThrow(key: string): string {

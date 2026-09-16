@@ -9,6 +9,7 @@ import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { AppConfigService } from '../common/config/app-config.service';
 import { RedisService } from '../common/redis/redis.service';
+import { MailerService } from '../common/mailer/mailer.service';
 import { UsersService, UserAuthProfile } from '../users/users.service';
 import { SessionService, SessionDeviceSummary } from './session.service';
 import { AccessTokenPayload } from './jwt-payload.interface';
@@ -54,15 +55,18 @@ export interface RefreshResult {
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly accessTtlSeconds: number;
+  private readonly frontendBaseUrl: string;
 
   constructor(
     private readonly users: UsersService,
     private readonly sessions: SessionService,
     private readonly jwt: JwtService,
     private readonly redis: RedisService,
+    private readonly mailer: MailerService,
     config: AppConfigService,
   ) {
     this.accessTtlSeconds = parseDurationSeconds(config.jwtAccessTtl);
+    this.frontendBaseUrl = config.frontendBaseUrl;
   }
 
   async login(
@@ -182,9 +186,8 @@ export class AuthService {
   /**
    * Always resolves the same way regardless of whether `identifier` matched an account — never
    * lets a caller distinguish "sent" from "no such account" (security-standards A07/user
-   * enumeration). Actually delivering the link is PRD §36's notifications worker (Phase 7.7,
-   * doesn't exist yet); until then this logs the link server-side only, clearly marked as a dev
-   * stand-in, and never returns it in the response.
+   * enumeration). Delivered via `MailerService` — a real send once SMTP is configured, a
+   * `[dev-only]` log otherwise (that service's own doc comment).
    */
   async forgotPassword(identifier: string): Promise<void> {
     const candidates =
@@ -200,22 +203,28 @@ export class AuthService {
       PASSWORD_RESET_TTL_SECONDS,
     );
 
-    this.logger.warn(
-      `[dev-only] Password reset requested for user ${user.id}. Phase 7.7's notification worker ` +
-        `will email this instead of logging it — token: ${token}`,
-    );
+    await this.mailer.send({
+      to: user.email,
+      subject: 'Reset your SchoolOS password',
+      html: resetPasswordEmail(user.name, this.resetLink(token)),
+    });
   }
 
   /**
    * Issues the same kind of one-time token as `forgotPassword`, for a user who can't request one
    * themselves — `POST /platform/schools`' onboarding flow (Phase 7.9) is the one caller: it
-   * creates a school's first admin as `status: INVITED` with no usable password, and
+   * creates a school's first Owner as `status: INVITED` with no usable password, and
    * `forgotPassword`'s own `findAuthCandidatesByIdentifier` lookup only ever resolves an
    * already-`ACTIVE` account, so it can't be the thing that gets this account its first token.
-   * Same dev-only "log it, don't email it" placeholder, same reasoning (Phase 7.7's notification
-   * worker isn't built).
+   * Takes `email`/`name` directly rather than looking the user up — the caller (`SchoolsService.
+   * create`) already has both from the row it just created, and `INVITED` accounts don't resolve
+   * through `UsersService`'s own active-only lookups anyway.
    */
-  async issueInviteToken(userId: string): Promise<void> {
+  async issueInviteToken(
+    userId: string,
+    email: string,
+    name: string,
+  ): Promise<void> {
     const token = randomBytes(32).toString('base64url');
     await this.redis.set(
       this.resetTokenKey(token),
@@ -223,10 +232,11 @@ export class AuthService {
       'EX',
       PASSWORD_RESET_TTL_SECONDS,
     );
-    this.logger.warn(
-      `[dev-only] Invite issued for user ${userId}. Phase 7.7's notification worker will email ` +
-        `this instead of logging it — token: ${token}`,
-    );
+    await this.mailer.send({
+      to: email,
+      subject: 'Welcome to SchoolOS — set your password',
+      html: inviteEmail(name, this.resetLink(token)),
+    });
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {
@@ -291,6 +301,10 @@ export class AuthService {
   private resetTokenKey(token: string): string {
     return `password-reset:${createHash('sha256').update(token).digest('hex')}`;
   }
+
+  private resetLink(token: string): string {
+    return `${this.frontendBaseUrl}/reset-password?token=${token}`;
+  }
 }
 
 function toAuthUser(user: UserAuthProfile) {
@@ -308,4 +322,22 @@ function hashIdentifier(identifier: string): string {
   return createHash('sha256')
     .update(identifier.trim().toLowerCase())
     .digest('hex');
+}
+
+function resetPasswordEmail(name: string, link: string): string {
+  return `
+    <p>Hi ${name},</p>
+    <p>We received a request to reset your SchoolOS password. This link expires in 30 minutes:</p>
+    <p><a href="${link}">${link}</a></p>
+    <p>If you didn't request this, you can safely ignore this email.</p>
+  `;
+}
+
+function inviteEmail(name: string, link: string): string {
+  return `
+    <p>Hi ${name},</p>
+    <p>Your school has been set up on SchoolOS. Set your password to log in for the first time
+    (this link expires in 30 minutes):</p>
+    <p><a href="${link}">${link}</a></p>
+  `;
 }

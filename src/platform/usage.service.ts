@@ -32,17 +32,15 @@ export class UsageService {
       activeSchools,
       activeUsers,
       activeStudents,
-      activeSubscriptions,
+      billableSubscriptions,
       totalSubscriptions,
       canceledSubscriptions,
       storage,
     ] = await Promise.all([
-      // "Active" here means "operationally on the platform" (not suspended), not "billing-status
-      // ACTIVE" — a school straight out of onboarding is `TRIAL` and would otherwise never count
-      // as active at all (nothing in this codebase yet flips `TRIAL` → `ACTIVE` once a trial
-      // period ends, since there's no scheduled job to do it — see this file's own header comment
-      // on what's real vs. placeholder here). `mrr` below is the metric that already excludes
-      // trials on purpose; this one shouldn't double up on that distinction.
+      // "Active" here means "operationally on the platform" (not suspended), a `Tenant.status`
+      // question — distinct from `mrr` below, which is a `Subscription.status` question (does this
+      // school still owe money right now). A school mid-grace-window is "active" here but already
+      // counted toward `mrr` too; the two aren't meant to agree.
       this.platformPrisma.tenant.count({
         where: { status: { not: 'SUSPENDED' }, school: { isNot: null } },
       }),
@@ -50,9 +48,12 @@ export class UsageService {
         where: { status: 'ACTIVE', tenant: { school: { isNot: null } } },
       }),
       this.platformPrisma.student.count({ where: { status: 'active' } }),
+      // Same "still owed, just not yet confirmed" reasoning `SubscriptionsService`'s own `toResponse`
+      // gives for counting a `GRACE` subscription's price toward MRR — it stops counting only once
+      // `SUSPENDED`/`CANCELED`.
       this.platformPrisma.subscription.findMany({
-        where: { status: 'ACTIVE' },
-        select: { plan: { select: { priceMonthly: true } } },
+        where: { status: { in: ['ACTIVE', 'GRACE'] } },
+        select: { monthlyAmount: true },
       }),
       this.platformPrisma.subscription.count(),
       this.platformPrisma.subscription.count({ where: { status: 'CANCELED' } }),
@@ -61,8 +62,8 @@ export class UsageService {
       }),
     ]);
 
-    const mrr = activeSubscriptions.reduce(
-      (sum, subscription) => sum + subscription.plan.priceMonthly,
+    const mrr = billableSubscriptions.reduce(
+      (sum, subscription) => sum + subscription.monthlyAmount,
       0,
     );
     const churnRatePct =

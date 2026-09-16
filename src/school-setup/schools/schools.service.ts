@@ -1,9 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, School } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { PlatformPrismaService } from '../../common/prisma/platform-prisma.service';
 import { RequestContextService } from '../../common/context/request-context.service';
 import { SchoolProfileDto } from './dto/school.dto';
 import { SchoolResponseDto } from './dto/school-response.dto';
+import { SubscriptionStatusResponseDto } from './dto/subscription-status.dto';
 
 /**
  * §6 School Profile — `GET/PATCH /schools/current` (`modules/school-setup.md`'s own "confirm with
@@ -16,11 +18,40 @@ import { SchoolResponseDto } from './dto/school-response.dto';
 export class SchoolsService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly platformPrisma: PlatformPrismaService,
     private readonly requestContext: RequestContextService,
   ) {}
 
   async getCurrent(): Promise<SchoolResponseDto> {
     return toResponse(await this.getOrCreate());
+  }
+
+  /**
+   * Third sanctioned call site for `PlatformPrismaService` (`platform-prisma.service.ts`'s own
+   * doc comment lists the first two) — `Subscription` isn't tenant-scoped
+   * (`schema.prisma`'s "Platform Console" section), so the ordinary tenant-scoped `PrismaService`
+   * can't read it at all. Safe here specifically because the `tenantId` filter below comes from
+   * `RequestContextService` (the authenticated caller's own tenant, set by the auth guard), never
+   * from client input — this can only ever read the caller's own subscription, not an arbitrary
+   * one.
+   */
+  async getSubscriptionStatus(): Promise<SubscriptionStatusResponseDto> {
+    const tenantId = this.requestContext.tenantId;
+    const subscription = tenantId
+      ? await this.platformPrisma.subscription.findUnique({
+          where: { tenantId },
+        })
+      : null;
+    if (!subscription) {
+      throw new NotFoundException('No subscription found for this school');
+    }
+    return {
+      status:
+        subscription.status.toLowerCase() as SubscriptionStatusResponseDto['status'],
+      currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+      graceEndsAt: subscription.graceEndsAt?.toISOString() ?? null,
+      monthlyAmount: subscription.monthlyAmount,
+    };
   }
 
   async updateCurrent(dto: SchoolProfileDto): Promise<SchoolResponseDto> {

@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -13,13 +15,14 @@ import { SkipAudit } from '../common/decorators/skip-audit.decorator';
 import { ListQueryDto } from '../common/pagination/list-query.dto';
 import { SubscriptionsService } from './subscriptions.service';
 import {
+  ConfirmPaymentDto,
   CreateSubscriptionDto,
   PagedSubscriptionsDto,
   SubscriptionResponseDto,
   UpdateSubscriptionDto,
 } from './dto/subscription.dto';
 
-/** See `plans.controller.ts`'s own comment on why every route here is `@SkipAudit()`. */
+/** Every route here is `@SkipAudit()` — `PlatformAuditLogService.record` is called explicitly from within `SubscriptionsService` instead (see its own doc comment on why the generic tenant-scoped audit interceptor can't help here). */
 @ApiTags('platform')
 @Controller('platform/subscriptions')
 export class SubscriptionsController {
@@ -46,5 +49,16 @@ export class SubscriptionsController {
     @Body() dto: UpdateSubscriptionDto,
   ): Promise<SubscriptionResponseDto> {
     return this.subscriptions.update(id, dto);
+  }
+
+  @Post(':id/confirm-payment')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('platform.subscriptions.manage')
+  @SkipAudit()
+  confirmPayment(
+    @Param('id') id: string,
+    @Body() dto: ConfirmPaymentDto,
+  ): Promise<SubscriptionResponseDto> {
+    return this.subscriptions.confirmPayment(id, dto);
   }
 }

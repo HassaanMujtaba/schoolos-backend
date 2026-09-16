@@ -1,11 +1,8 @@
 import {
   BadRequestException,
-  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import * as bcrypt from 'bcryptjs';
-import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { PlatformPrismaService } from '../common/prisma/platform-prisma.service';
 import { PagedResult } from '../common/pagination/list-query.dto';
@@ -15,10 +12,11 @@ import {
   toSkipTake,
 } from '../common/pagination/paginate';
 import { AuthService } from '../auth/auth.service';
+import { unusablePasswordHash } from '../auth/utils/unusable-password';
 import { lowerEnum, slugSuffix, slugify, upperEnum } from './platform.mappers';
-import { BILLING_PROVIDER, BillingProvider } from './billing-provider';
 import { BillingService } from './billing.service';
 import { PlatformAuditLogService } from './platform-audit-log.service';
+import { addOneMonthPkt, startOfTodayPkt } from '../common/dates/pkt-time';
 import {
   ListSchoolsQueryDto,
   SchoolDetailResponseDto,
@@ -31,7 +29,7 @@ const SORTABLE_FIELDS = ['name', 'createdAt'] as const;
 
 const SCHOOL_INCLUDE = {
   school: true,
-  subscription: { include: { plan: true } },
+  subscription: true,
   branches: { select: { id: true, name: true } },
   _count: {
     select: {
@@ -45,15 +43,6 @@ const SCHOOL_INCLUDE = {
 type TenantWithSchool = Prisma.TenantGetPayload<{
   include: typeof SCHOOL_INCLUDE;
 }>;
-
-// A bcrypt hash of a value nobody will ever type — `bcrypt.compare` always returns false against
-// it, which is what actually keeps an onboarded-but-not-yet-invited account from logging in
-// before `AuthService.resetPassword` sets a real one (its `status: INVITED` already blocks login
-// via `UsersService.findAuthCandidatesByIdentifier`'s own `status: 'ACTIVE'` filter — this is a
-// second, independent lock, not a load-bearing one).
-function unusablePasswordHash(): string {
-  return bcrypt.hashSync(randomUUID(), 10);
-}
 
 /**
  * `GET/POST/PATCH /platform/schools` — `modules/platform-console.md` "Schools (tenant
@@ -70,7 +59,6 @@ export class SchoolsService {
     private readonly auth: AuthService,
     private readonly auditLog: PlatformAuditLogService,
     private readonly billingRecords: BillingService,
-    @Inject(BILLING_PROVIDER) private readonly billing: BillingProvider,
   ) {}
 
   async list(
@@ -120,34 +108,16 @@ export class SchoolsService {
   }
 
   async create(dto: SchoolOnboardingDto): Promise<SchoolResponseDto> {
-    const tier = upperEnum<'STARTER' | 'PROFESSIONAL' | 'ENTERPRISE'>(dto.plan);
-    const plan = await this.platformPrisma.plan.findUnique({ where: { tier } });
-    if (!plan) {
-      // Unreachable once `prisma:seed` has run (it seeds all three tiers) — fails clearly rather
-      // than a confusing FK-violation deep in the transaction below if it somehow hasn't.
-      throw new BadRequestException(
-        `Plan tier "${dto.plan}" is not seeded — run prisma:seed`,
-      );
-    }
-
-    const provisioned = await this.billing.provisionSubscription({
-      tenantName: dto.name,
-      contactEmail: dto.contactEmail,
-      plan,
-    });
-
     const slug = await this.uniqueSlug(dto.name);
     const ownerRole = await this.platformPrisma.role.findUniqueOrThrow({
       where: { key: 'school_owner' },
     });
+    const periodStart = startOfTodayPkt();
+    const periodEnd = addOneMonthPkt(periodStart);
 
     const tenant = await this.platformPrisma.$transaction(async (tx) => {
       const created = await tx.tenant.create({
-        data: {
-          name: dto.name,
-          slug,
-          status: provisioned.trialEndsAt ? 'TRIAL' : 'ACTIVE',
-        },
+        data: { name: dto.name, slug, status: 'ACTIVE' },
       });
       await tx.school.create({
         data: { tenantId: created.id, name: dto.name, email: dto.contactEmail },
@@ -155,20 +125,17 @@ export class SchoolsService {
       const subscription = await tx.subscription.create({
         data: {
           tenantId: created.id,
-          planId: plan.id,
-          status: provisioned.trialEndsAt ? 'TRIALING' : 'ACTIVE',
-          currentPeriodStart: provisioned.currentPeriodStart,
-          currentPeriodEnd: provisioned.currentPeriodEnd,
-          trialEndsAt: provisioned.trialEndsAt,
-          stripeCustomerId: provisioned.providerCustomerId,
-          stripeSubscriptionId: provisioned.providerSubscriptionId,
+          monthlyAmount: dto.monthlyAmount,
+          status: 'ACTIVE',
+          currentPeriodStart: periodStart,
+          currentPeriodEnd: periodEnd,
         },
       });
       const owner = await tx.user.create({
         data: {
           tenantId: created.id,
           email: dto.contactEmail,
-          name: `${dto.name} Admin`,
+          name: `${dto.name} Owner`,
           passwordHash: unusablePasswordHash(),
           status: 'INVITED',
         },
@@ -179,18 +146,24 @@ export class SchoolsService {
       return {
         tenantId: created.id,
         ownerId: owner.id,
+        ownerEmail: owner.email,
+        ownerName: owner.name,
         subscriptionId: subscription.id,
       };
     });
 
-    // Outside the transaction — Redis, not Postgres (same "don't hold a DB transaction open
+    // Outside the transaction — Redis + SMTP, not Postgres (same "don't hold a DB transaction open
     // across an unrelated I/O call" reasoning `certificates.service.ts`'s storage upload follows).
-    await this.auth.issueInviteToken(tenant.ownerId);
-    await this.billingRecords.recordFirstPeriod({
+    await this.auth.issueInviteToken(
+      tenant.ownerId,
+      tenant.ownerEmail,
+      tenant.ownerName,
+    );
+    await this.billingRecords.createPendingRecord({
       tenantId: tenant.tenantId,
       subscriptionId: tenant.subscriptionId,
-      amount: plan.priceMonthly,
-      issuedAt: provisioned.currentPeriodStart,
+      amount: dto.monthlyAmount,
+      issuedAt: periodStart,
     });
     await this.auditLog.record({
       action: 'school.onboarded',
@@ -265,7 +238,7 @@ function toResponse(tenant: TenantWithSchool): SchoolResponseDto {
     name: tenant.school.name,
     contactEmail: tenant.school.email,
     status: lowerEnum(tenant.status),
-    plan: lowerEnum(tenant.subscription?.plan.tier ?? 'STARTER'),
+    monthlyAmount: tenant.subscription?.monthlyAmount ?? 0,
     branchCount: tenant._count.branches,
     userCount: tenant._count.users,
     studentCount: tenant._count.students,

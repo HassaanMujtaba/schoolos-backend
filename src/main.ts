@@ -12,12 +12,6 @@ async function bootstrap() {
     // Source maps are fine server-side (unlike the frontend build, which disables them) — this
     // process never ships to a client.
     bufferLogs: true,
-    // Phase 7.9 — `platform/billing-webhook.controller.ts` needs the exact raw request bytes
-    // (`req.rawBody`) to verify a Stripe webhook signature; a signature check against JSON that's
-    // already been parsed-and-reserialized doesn't byte-for-byte match what Stripe signed. This
-    // flag makes Nest stash the raw buffer alongside the parsed body for every route, not just
-    // that one — cheap (the buffer already exists mid-parse) and no other route reads it.
-    rawBody: true,
   });
 
   const config = app.get(AppConfigService);

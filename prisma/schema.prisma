@@ -265,8 +265,8 @@ model School {
   /// (`schools/dto/school.dto.ts`'s `@IsIn`), matching `SubjectType` below's contrasting choice
   /// (no hyphens there, so a real enum works and does).
   schoolType         String   @default("other")
-  timezone           String   @default("UTC")
-  currency           String   @default("USD")
+  timezone           String   @default("Asia/Karachi")
+  currency           String   @default("PKR")
   language           String   @default("en")
   logoUrl            String   @default("")
   createdAt          DateTime @default(now())
@@ -2225,6 +2225,7 @@ enum NotificationType {
   ptm
   library
   system
+  billing
 }
 
 enum NotificationChannel {
@@ -2496,73 +2497,46 @@ model AuditLog {
 // tenant-scoped `PrismaService`. Adding these to `TENANT_SCOPED_MODELS` would be actively wrong,
 // not just unnecessary — every read here needs to see rows across tenants, not just one.
 
-/// PRD §53's three tiers — a fixed, seeded catalog (`prisma/seed.ts`), not a tenant-defined
-/// custom-plan builder (`frontend/src/features/platform/schemas.ts`'s own comment: "schema
-/// doesn't model creating/deleting a tier, only editing one's price/limits/feature list").
-/// Uppercase members, lowercased at the API boundary (`platform/platform.mappers.ts`'s
-/// `lowerEnum`) — the same enum-vs-frontend-lowercase-literal-union gap `TenantStatus` already
-/// had since Phase 0, unexercised by any real caller until this phase.
-enum PlanTier {
-  STARTER
-  PROFESSIONAL
-  ENTERPRISE
-}
-
-model Plan {
-  id            String   @id @default(uuid())
-  tier          PlanTier @unique
-  name          String
-  /// Dollars, not cents — matches `Invoice.totalAmount`/payroll's own `Float` money convention
-  /// elsewhere in this schema, not a new one introduced here.
-  priceMonthly  Float
-  maxBranches   Int
-  maxStudents   Int
-  features      String[]
-  /// Null under `LocalBillingProvider` — `StripeBillingProvider` needs a real Stripe Price id to
-  /// create a subscription against; `platform/billing-provider.ts` throws a clear config error
-  /// (not a confusing Stripe API error) if Stripe is configured but a plan is missing this.
-  stripePriceId String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  subscriptions Subscription[]
-
-  @@map("plans")
-}
-
+/// No fixed tiers — pricing is negotiated per school (`Subscription.monthlyAmount`), so this enum
+/// only tracks a subscription's payment lifecycle: `ACTIVE` (paid through `currentPeriodEnd`),
+/// `GRACE` (period lapsed, within the Platform-Admin-configured grace window —
+/// `PlatformSettings.subscriptionGracePeriodDays`), `SUSPENDED` (grace window lapsed unpaid,
+/// `subscription-sweep.service.ts` auto-suspends the tenant too), `CANCELED` (manual, Platform
+/// Admin only). Uppercase members, lowercased at the API boundary
+/// (`platform/platform.mappers.ts`'s `lowerEnum`) — the same enum-vs-frontend-lowercase-literal-
+/// union gap `TenantStatus` already had since Phase 0.
 enum SubscriptionStatus {
-  TRIALING
   ACTIVE
-  PAST_DUE
+  GRACE
+  SUSPENDED
   CANCELED
 }
 
 /// One active subscription per tenant (`@@unique` on `tenantId`) — PRD §53 and the frontend's own
 /// `Subscription` type (one row per tenant in `SubscriptionTable`) don't model a tenant holding
-/// two concurrent subscriptions. `stripeCustomerId`/`stripeSubscriptionId` stay null under
-/// `LocalBillingProvider` (no `STRIPE_SECRET_KEY` configured — see `platform/billing-provider.ts`)
-/// and get populated once a real Stripe subscription backs this row.
+/// two concurrent subscriptions. Pricing is a manually negotiated PKR amount per school, not a
+/// fixed global plan — see `platform/subscriptions.service.ts`. `graceEndsAt`/`lastReminderEmailAt`
+/// are set by `platform/subscription-sweep.service.ts`'s daily sweep once `currentPeriodEnd`
+/// lapses, and cleared again by `SubscriptionsService.confirmPayment` on renewal.
 model Subscription {
-  id                   String             @id @default(uuid())
-  tenantId             String             @unique
-  planId               String
-  status               SubscriptionStatus @default(TRIALING)
-  currentPeriodStart   DateTime
-  currentPeriodEnd     DateTime
-  trialEndsAt          DateTime?
-  cancelAtPeriodEnd    Boolean            @default(false)
-  stripeCustomerId     String?
-  /// `@unique` (nullable, same "Postgres allows multiple NULLs" reasoning as `BillingRecord.
-  /// providerInvoiceId`) — `billing.service.ts`'s webhook handler looks a `Subscription` up by
-  /// this id on every `customer.subscription.*`/`invoice.*` event; Stripe's own id is already
-  /// globally unique, so this is just letting Prisma's `findUnique` use it directly instead of a
-  /// `findFirst` scan.
-  stripeSubscriptionId String?            @unique
-  createdAt            DateTime           @default(now())
-  updatedAt            DateTime           @updatedAt
+  id                  String             @id @default(uuid())
+  tenantId            String             @unique
+  /// PKR, matching `Invoice.totalAmount`/payroll's own bare-`Float` money convention elsewhere in
+  /// this schema — negotiated individually per school, not looked up from a shared plan table.
+  monthlyAmount       Float
+  status              SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart  DateTime
+  currentPeriodEnd    DateTime
+  /// Set once `currentPeriodEnd` lapses unpaid (`status: GRACE`); the sweep auto-suspends once
+  /// `now > graceEndsAt`. Cleared back to null on the next confirmed payment.
+  graceEndsAt         DateTime?
+  /// Dedupes the sweep's reminder email/notification — set the first time a period is found
+  /// lapsed, cleared on renewal, so a school in `GRACE` isn't re-emailed every sweep run.
+  lastReminderEmailAt DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 
   tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  plan           Plan            @relation(fields: [planId], references: [id])
   billingRecords BillingRecord[]
 
   @@map("subscriptions")
@@ -2574,9 +2548,11 @@ enum BillingRecordStatus {
   FAILED
 }
 
-/// One row per billing period/invoice (§53). `providerInvoiceId`/`invoiceUrl` stay null under
-/// `LocalBillingProvider`, populated from a real Stripe invoice once one exists
-/// (`platform/billing-provider.ts`).
+/// One row per billing period (§53) — exactly one `PENDING` row exists per subscription at a
+/// time, representing the current/upcoming charge; `SubscriptionsService.confirmPayment` marks it
+/// `PAID` (`confirmedAt`/`confirmedByUserId` — a Platform Admin manually confirming a payment
+/// received outside the platform, e.g. bank transfer) and creates the next period's `PENDING` row.
+/// `FAILED` is admin-settable (uncollectible/waived), not a payment-gateway webhook outcome.
 model BillingRecord {
   id                String              @id @default(uuid())
   tenantId          String
@@ -2586,12 +2562,13 @@ model BillingRecord {
   status            BillingRecordStatus @default(PENDING)
   issuedAt          DateTime
   paidAt            DateTime?
-  /// `@unique` (nullable — Postgres allows multiple NULLs under a unique index, so every
-  /// `LocalBillingProvider`-created row coexists fine) so `billing.service.ts`'s webhook handler
-  /// can `upsert` on it — Stripe redelivers webhook events on any non-2xx response, and an
-  /// invoice's own id is the natural idempotency key for "have I already recorded this one."
-  providerInvoiceId String?             @unique
-  invoiceUrl        String?
+  confirmedByUserId String?
+  /// Denormalized snapshot of the confirming Platform Admin's name at confirmation time — same
+  /// "survives the referenced row's own lifecycle" reasoning `AuditLog.actorUserId`/
+  /// `FeatureFlag.tenantName` already document, not a live join.
+  confirmedByName   String?
+  confirmedAt       DateTime?
+  note              String?
   createdAt         DateTime            @default(now())
 
   tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -2599,6 +2576,18 @@ model BillingRecord {
 
   @@index([tenantId])
   @@map("billing_records")
+}
+
+/// Single-row platform-wide config table — `id` is always the literal `"singleton"`, read/written
+/// via upsert on that fixed id (`platform/platform-settings.service.ts`). Holds settings that
+/// apply uniformly across every tenant rather than per-school, same reasoning `School.currency`/
+/// `timezone`'s own Pakistan-only defaults give for staying a system-wide constant "for now."
+model PlatformSettings {
+  id                           String   @id @default("singleton")
+  subscriptionGracePeriodDays  Int      @default(5)
+  updatedAt                    DateTime @updatedAt
+
+  @@map("platform_settings")
 }
 
 enum FeatureFlagScope {

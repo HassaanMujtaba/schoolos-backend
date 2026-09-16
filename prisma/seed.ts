@@ -3,9 +3,10 @@
  * `../implementation-plan.md`'s "Permission catalog" (itself collected verbatim from every
  * `frontend/modules/*.md` doc). Run via `npm run prisma:seed`.
  *
- * `super_admin` is granted every permission here, `school_owner` every *non-platform* one (owning
- * a school implies full control of that school, not a guess the way a Receptionist's or Teacher's
- * exact permission set would be — see `SCHOOL_OWNER_PERMISSIONS` below). Every other role's actual
+ * `super_admin` is granted every permission here, `school_owner` and `school_admin` both every
+ * *non-platform* one (owning/administering a school implies full control of that school, not a
+ * guess the way a Receptionist's or Teacher's exact permission set would be — see
+ * `schoolOwnerPermissions` below, reused for both roles). Every other role's actual
  * permission grants are still a product decision (which of `students.read`/`students.create`/...
  * does a Receptionist actually get?) that PRD §4 gestures at but doesn't fully enumerate, so they
  * start with zero — the fail-closed default — rather than a guessed-into-a-seed-script matrix.
@@ -74,6 +75,14 @@ const PERMISSIONS: string[] = [
   // `features/school-setup` form/table) — see ../implementation-plan.md's Phase 2 section.
   'school.read',
   'school.update',
+  'school.billing.read',
+  // Tenant-level staff user management (`user-management/` — distinct from `platform.support.
+  // read`'s cross-tenant Super Admin search) — a School Owner/Admin creating/managing staff
+  // accounts and their role assignments.
+  'users.read',
+  'users.create',
+  'users.update',
+  'users.deactivate',
   'branches.read',
   'branches.create',
   'branches.update',
@@ -176,58 +185,6 @@ const PERMISSIONS: string[] = [
   'ai.query',
   'ai.generate-content',
   'ai.view-analytics',
-];
-
-// Phase 7.9 (Platform Console) — PRD §53's three fixed tiers. `priceMonthly` in dollars (matches
-// `Invoice.totalAmount`'s own convention); `stripePriceId: null` until a real Stripe account's
-// price ids are configured (`platform/billing-provider.ts`'s own doc comment — `LocalBillingProvider`
-// never reads this field at all).
-const PLANS: Array<{
-  tier: 'STARTER' | 'PROFESSIONAL' | 'ENTERPRISE';
-  name: string;
-  priceMonthly: number;
-  maxBranches: number;
-  maxStudents: number;
-  features: string[];
-}> = [
-  {
-    tier: 'STARTER',
-    name: 'Starter',
-    priceMonthly: 49,
-    maxBranches: 1,
-    maxStudents: 300,
-    features: [
-      'Core academics & attendance',
-      'Fee collection',
-      'Parent portal',
-    ],
-  },
-  {
-    tier: 'PROFESSIONAL',
-    name: 'Professional',
-    priceMonthly: 149,
-    maxBranches: 5,
-    maxStudents: 2000,
-    features: [
-      'Everything in Starter',
-      'Examinations & report cards',
-      'Library, transport & inventory',
-      'HR & payroll',
-    ],
-  },
-  {
-    tier: 'ENTERPRISE',
-    name: 'Enterprise',
-    priceMonthly: 399,
-    maxBranches: 50,
-    maxStudents: 20000,
-    features: [
-      'Everything in Professional',
-      'Hostel management',
-      'Advanced reports & analytics',
-      'Priority support',
-    ],
-  },
 ];
 
 // Phase 7.9 — a small, fixed catalog (self-service flag *creation* isn't built this phase,
@@ -339,23 +296,32 @@ async function main() {
     skipDuplicates: true,
   });
 
+  // `school_admin` starts with the same non-`platform.*` grant as `school_owner` — a school
+  // creating an Admin user expects them to actually be able to administer the school, not land on
+  // a zero-permission account. This is a starting default, not a fixed boundary: a School Owner or
+  // Super Admin can narrow it per-tenant later via the existing role-permission editor
+  // (`platform/roles.service.ts`'s own `updatePermissions`) without another migration or reseed.
+  const schoolAdmin = await prisma.role.findUniqueOrThrow({
+    where: { key: 'school_admin' },
+  });
+  await prisma.rolePermission.createMany({
+    data: schoolOwnerPermissions.map((permission) => ({
+      roleId: schoolAdmin.id,
+      permissionId: permission.id,
+    })),
+    skipDuplicates: true,
+  });
+
   console.log(
-    `Seeding ${PLANS.length} plans and ${FEATURE_FLAGS.length} feature flags...`,
+    `Seeding platform settings + ${FEATURE_FLAGS.length} feature flags...`,
   );
 
-  for (const plan of PLANS) {
-    await prisma.plan.upsert({
-      where: { tier: plan.tier },
-      update: {
-        name: plan.name,
-        priceMonthly: plan.priceMonthly,
-        maxBranches: plan.maxBranches,
-        maxStudents: plan.maxStudents,
-        features: plan.features,
-      },
-      create: plan,
-    });
-  }
+  // Singleton row — `platform/platform-settings.service.ts` always reads/writes id "singleton".
+  await prisma.platformSettings.upsert({
+    where: { id: 'singleton' },
+    update: {},
+    create: { id: 'singleton' },
+  });
 
   for (const flag of FEATURE_FLAGS) {
     // Not `upsert` with the `key_tenantId` compound-unique shorthand — Prisma's generated type
@@ -413,11 +379,11 @@ async function main() {
   });
 
   console.log(
-    'Seed complete. school_owner has every non-platform permission; every other non-' +
-      "super_admin role has zero — see this file's own header comment for why, and assign the " +
-      'real per-role matrix via /platform/roles (Super Admin only) once product confirms it. ' +
-      'Log in to /platform as the seeded Super Admin with SUPER_ADMIN_EMAIL/SUPER_ADMIN_PASSWORD ' +
-      '(or the dev defaults above) once this has run.',
+    'Seed complete. school_owner and school_admin both have every non-platform permission; ' +
+      "every other non-super_admin role has zero — see this file's own header comment for why, " +
+      'and assign the real per-role matrix via /platform/roles (Super Admin only) once product ' +
+      'confirms it. Log in to /platform as the seeded Super Admin with SUPER_ADMIN_EMAIL/' +
+      'SUPER_ADMIN_PASSWORD (or the dev defaults above) once this has run.',
   );
 }
 

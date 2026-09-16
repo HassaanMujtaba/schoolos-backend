@@ -20,7 +20,7 @@ import {
   UpdateSchoolStatusDto,
 } from './dto/school.dto';
 
-/** See `plans.controller.ts`'s own comment on why every mutating route here is `@SkipAudit()`. */
+/** Every mutating route here is `@SkipAudit()` — `PlatformAuditLogService.record` is called explicitly from within `SchoolsService` instead (see its own doc comment on why the generic tenant-scoped audit interceptor can't help here). */
 @ApiTags('platform')
 @Controller('platform/schools')
 export class SchoolsController {

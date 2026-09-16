@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
 
 /**
- * Every enum this module introduced (`PlanTier`, `TenantStatus`, `SubscriptionStatus`,
- * `BillingRecordStatus`, `FeatureFlagScope`) was deliberately spelled so its uppercase Prisma
- * member name lowercases into exactly the literal union `frontend/src/features/platform/
- * schemas.ts`/`api.ts` expects (`ACTIVE` → `'active'`, `PAST_DUE` → `'past_due'`, ...) — one
+ * Every enum this module introduced (`TenantStatus`, `SubscriptionStatus`, `BillingRecordStatus`,
+ * `FeatureFlagScope`) was deliberately spelled so its uppercase Prisma member name lowercases into
+ * exactly the literal union `frontend/src/features/platform/schemas.ts`/`api.ts` expects
+ * (`ACTIVE` → `'active'`, `GRACE` → `'grace'`, ...) — one
  * generic cast here instead of a bespoke switch per enum. If a future enum member's name doesn't
  * lowercase-match its frontend counterpart, this is the one place that assumption would need to
  * become a real mapping table.
