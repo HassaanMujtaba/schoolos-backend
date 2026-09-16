@@ -247,15 +247,21 @@ async function main() {
     `Seeding ${PERMISSIONS.length} permissions and ${ROLES.length} roles...`,
   );
 
-  const permissionRecords = await Promise.all(
-    PERMISSIONS.map((key) =>
-      prisma.permission.upsert({
+  // Sequential, not `Promise.all` — this ran fine against a normal Postgres connection, but a
+  // 100+-way burst of simultaneous connections is exactly the kind of load a connection-limited
+  // pooler (e.g. Supabase's session-mode PgBouncer, which `prisma migrate`/one-off scripts like
+  // this one should use — see `schema.prisma`'s own `directUrl` doc comment) can't absorb. A
+  // one-time setup script has no reason to optimize for parallelism over that.
+  const permissionRecords = [];
+  for (const key of PERMISSIONS) {
+    permissionRecords.push(
+      await prisma.permission.upsert({
         where: { key },
         update: {},
         create: { key, label: key },
       }),
-    ),
-  );
+    );
+  }
 
   for (const role of ROLES) {
     await prisma.role.upsert({

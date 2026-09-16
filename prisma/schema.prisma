@@ -8,8 +8,17 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Prisma Migrate needs a direct (non-transaction-pooled) connection — PgBouncer's transaction
+  // pooling mode (what DATABASE_URL points at in production, Supabase port 6543) doesn't reliably
+  // support the DDL Migrate runs, `ALTER TYPE ... ADD VALUE` in particular (confirmed the hard way:
+  // it's what took production down on 2026-09-16 — the migration failed on its very first
+  // statement, `applied_steps_count: 0`, nothing else was touched). `directUrl` is Prisma's own
+  // documented fix for exactly this Supabase/PgBouncer shape: the CLI (migrate/db push/introspect)
+  // uses this one, `PrismaClient` at runtime keeps using the pooled `url` above unchanged. Point
+  // it at Supabase's session-mode pooler (port 5432) or the true direct connection, never 6543.
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,14 @@ services:
       - key: DATABASE_URL
         sync: false
 
+      # Same Supabase project, but "Session" pooler mode — port 5432 — for `prisma migrate
+      # deploy` (run by startCommand on every boot) to use instead of DATABASE_URL's transaction
+      # pooler. PgBouncer's transaction mode doesn't reliably support the DDL Migrate runs
+      # (`ALTER TYPE ... ADD VALUE` in particular took production down on 2026-09-16 this way —
+      # see schema.prisma's own `directUrl` doc comment). Never point this at port 6543 too.
+      - key: DIRECT_URL
+        sync: false
+
       # Upstash Redis "TLS" URL (rediss://...) from the Upstash console — ioredis auto-enables
       # TLS for the rediss:// scheme, no extra config needed.
       - key: REDIS_URL
