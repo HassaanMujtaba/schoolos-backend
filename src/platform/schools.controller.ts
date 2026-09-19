@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -53,5 +55,13 @@ export class SchoolsController {
     @Body() dto: UpdateSchoolStatusDto,
   ): Promise<SchoolResponseDto> {
     return this.schools.updateStatus(id, dto);
+  }
+
+  @Post(':id/resend-invite')
+  @RequirePermission('platform.schools.manage')
+  @SkipAudit()
+  @HttpCode(HttpStatus.OK)
+  resendInvite(@Param('id') id: string): Promise<void> {
+    return this.schools.resendInvite(id);
   }
 }

@@ -338,6 +338,53 @@ describe('Platform Console (e2e)', () => {
       expect(reinstate.status).toBe(200);
       expect(body<{ status: string }>(reinstate).status).toBe('active');
     });
+
+    it('POST /platform/schools/:id/resend-invite re-issues a working invite for a still-INVITED owner, and 400s once the owner has already activated', async () => {
+      const contactEmail = `admin-${randomUUID()}@dawn.test`;
+      const createRes = await request(app.getHttpServer())
+        .post('/v1/platform/schools')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          name: `Dawn Academy ${randomUUID()}`,
+          contactEmail,
+          monthlyAmount: 12000,
+        });
+      expect(createRes.status).toBe(201);
+      const tenantId = body<{ id: string }>(createRes).id;
+
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn');
+      const resendRes = await request(app.getHttpServer())
+        .post(`/v1/platform/schools/${tenantId}/resend-invite`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(resendRes.status).toBe(200);
+
+      const logged = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find(
+          (msg) =>
+            msg.includes('Welcome to SchoolOS') && msg.includes(contactEmail),
+        );
+      expect(logged).toBeDefined();
+      const token = logged!.match(/token=([^"&\s]+)/)?.[1];
+      warnSpy.mockRestore();
+
+      // The re-issued token is a live, independent credential — it activates the account.
+      const resetRes = await request(app.getHttpServer())
+        .post('/v1/auth/reset-password')
+        .send({ token, password: 'a brand new owner password 456' });
+      expect(resetRes.status).toBe(200);
+
+      const auditRow = await prisma.platformAuditLog.findFirstOrThrow({
+        where: { tenantId, action: 'school.invite_resent' },
+      });
+      expect(auditRow.tenantId).toBe(tenantId);
+
+      // Once activated, there's no pending invite left to resend.
+      const secondResend = await request(app.getHttpServer())
+        .post(`/v1/platform/schools/${tenantId}/resend-invite`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(secondResend.status).toBe(400);
+    });
   });
 
   describe('subscriptions & billing', () => {

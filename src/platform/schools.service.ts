@@ -175,6 +175,39 @@ export class SchoolsService {
     return this.get(tenant.tenantId);
   }
 
+  /**
+   * Re-issues the school owner's "set your password" invite (`create`'s `issueInviteToken` call)
+   * — covers the two ways the original invite goes stale: the 30-minute token expired, or the
+   * email never arrived (SMTP misconfigured/down at onboarding time). No-ops loudly via
+   * `BadRequestException` once the owner has activated — resending then would just be confusing,
+   * not harmful, but it's a sign the caller has the wrong tenant or stale UI state.
+   */
+  async resendInvite(tenantId: string): Promise<void> {
+    const tenant = await this.findOrThrow(tenantId);
+    const ownerRole = await this.platformPrisma.role.findUniqueOrThrow({
+      where: { key: 'school_owner' },
+    });
+    const owner = await this.platformPrisma.user.findFirst({
+      where: {
+        tenantId,
+        status: 'INVITED',
+        userRoles: { some: { roleId: ownerRole.id } },
+      },
+    });
+    if (!owner) {
+      throw new BadRequestException(
+        'No pending invite for this school — the owner has already set their password.',
+      );
+    }
+    await this.auth.issueInviteToken(owner.id, owner.email, owner.name);
+    await this.auditLog.record({
+      action: 'school.invite_resent',
+      target: tenant.school?.name ?? tenant.name,
+      tenantId,
+      tenantName: tenant.school?.name ?? tenant.name,
+    });
+  }
+
   async updateStatus(
     tenantId: string,
     dto: UpdateSchoolStatusDto,
