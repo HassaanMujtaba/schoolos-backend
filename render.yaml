@@ -69,3 +69,16 @@ services:
 
       - key: FRONTEND_BASE_URL
         sync: false
+
+      # Resend (resend.com > API Keys) — invite/reset-password/subscription emails
+      # (common/mailer/mailer.service.ts). Optional: unset means MailerService logs instead of
+      # sending. HTTPS API, not raw SMTP — this originally sent via nodemailer straight to Gmail's
+      # SMTP, which proved unreliable from Render's network (connections timed out, or failed
+      # immediately with ENETUNREACH against Gmail's IPv6 address).
+      - key: RESEND_API_KEY
+        sync: false
+      # SchoolOS <onboarding@resend.dev> until a real sending domain is verified in the Resend
+      # dashboard — the shared resend.dev domain only delivers to the Resend account's own
+      # address, not real recipients.
+      - key: RESEND_FROM
+        sync: false

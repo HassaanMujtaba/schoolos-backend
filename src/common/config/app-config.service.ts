@@ -85,29 +85,21 @@ export class AppConfigService {
     );
   }
 
-  // See `env.validation.ts`'s own doc comment for why every SMTP_* getter is optional (unlike the
-  // S3_* getters above, which throw): `undefined` `smtpHost` just means `MailerService` logs
-  // instead of sending.
-  get smtpHost(): string | undefined {
-    return this.config.get<string>('SMTP_HOST');
+  // See `env.validation.ts`'s own doc comment for why this is optional (unlike the S3_* getters
+  // above, which throw): `undefined` `resendApiKey` just means `MailerService` logs instead of
+  // sending. Raw SMTP (this project's original approach) turned out to be unreliable from
+  // Render's network reaching Gmail specifically — connections either timed out or, for Gmail's
+  // IPv6 address, failed immediately with ENETUNREACH — so mail goes through Resend's HTTPS API
+  // instead, which isn't subject to the outbound port-25/465/587 restrictions PaaS hosts commonly
+  // apply.
+  get resendApiKey(): string | undefined {
+    return this.config.get<string>('RESEND_API_KEY');
   }
 
-  get smtpPort(): number {
-    return this.config.get<number>('SMTP_PORT', 587);
-  }
-
-  get smtpUser(): string | undefined {
-    return this.config.get<string>('SMTP_USER');
-  }
-
-  get smtpPass(): string | undefined {
-    return this.config.get<string>('SMTP_PASS');
-  }
-
-  get smtpFrom(): string {
+  get resendFrom(): string {
     return this.config.get<string>(
-      'SMTP_FROM',
-      'SchoolOS <no-reply@schoolos.dev>',
+      'RESEND_FROM',
+      'SchoolOS <onboarding@resend.dev>',
     );
   }
 
