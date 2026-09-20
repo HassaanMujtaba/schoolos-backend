@@ -71,10 +71,11 @@ services:
         sync: false
 
       # SMTP — invite/reset-password/subscription emails (common/mailer/mailer.service.ts).
-      # Optional: unset means MailerService logs instead of sending. Gmail's SMTP previously
-      # failed outright from this service's network (ENETUNREACH against its IPv6 address, or a
-      # bare connection timeout on IPv4 — never an auth error) — a reachability problem, not a
-      # credentials one, and not guaranteed to be fixed just by redeploying.
+      # Optional: unset means MailerService logs instead of sending. Points at Resend's SMTP relay
+      # (smtp.resend.com), not Gmail's — Gmail's SMTP twice failed outright from this service's
+      # network, live-traced both times (ENETUNREACH against its IPv6 address, or a bare
+      # connection timeout on IPv4 — never an auth error), a reachability problem specific to
+      # Gmail's servers, not a credentials one or something a redeploy alone fixes.
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT

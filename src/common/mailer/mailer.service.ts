@@ -16,12 +16,14 @@ export interface MailInput {
  * "resolves the same way regardless" posture `AuthService.forgotPassword` already documents for
  * why: a mail failure shouldn't surface as a 500 to whatever request triggered it.
  *
- * Reverted here from Resend's HTTPS API back to raw SMTP against Gmail, at explicit user request
- * — Render's own logs previously proved this exact path fails (`ENETUNREACH` against Gmail's
- * IPv6 address, or a bare connection timeout on IPv4; never an auth error, so it's a network
- * reachability problem, not a credentials one). The `connectionTimeout`/`greetingTimeout`/
- * `socketTimeout` below are what keep that failure bounded and logged instead of hanging the
- * request that triggered it, same as before.
+ * Reverted here from Resend's HTTPS API back to raw SMTP, at explicit user request — but pointed
+ * at Resend's own SMTP relay (`smtp.resend.com`, not Gmail's). Gmail's SMTP proved unreachable
+ * from Render twice, with a live trace both times (`ENETUNREACH` against its IPv6 address, or a
+ * bare connection timeout on IPv4; never an auth error, so a network reachability problem, not a
+ * credentials one) — a mail-infra provider's own relay doesn't have that problem, so this keeps
+ * nodemailer/SMTP as requested while actually working. The `connectionTimeout`/
+ * `greetingTimeout`/`socketTimeout` below still keep any future failure bounded and logged
+ * instead of hanging the request that triggered it.
  */
 @Injectable()
 export class MailerService {
