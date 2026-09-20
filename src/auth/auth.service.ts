@@ -219,12 +219,19 @@ export class AuthService {
    * Takes `email`/`name` directly rather than looking the user up — the caller (`SchoolsService.
    * create`) already has both from the row it just created, and `INVITED` accounts don't resolve
    * through `UsersService`'s own active-only lookups anyway.
+   *
+   * Returns the link rather than `void` so a caller can surface it directly (the platform console
+   * does, on the school onboarding/resend-invite responses) — mail delivery is best-effort
+   * (`MailerService`'s own doc comment) and this project's Render deploy currently can't reach any
+   * SMTP host at all, so the link itself is the only way to actually test the invite flow. Safe to
+   * return here: every caller is already gated on `platform.schools.manage`, the same trust level
+   * required to trigger this action in the first place.
    */
   async issueInviteToken(
     userId: string,
     email: string,
     name: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const token = randomBytes(32).toString('base64url');
     await this.redis.set(
       this.resetTokenKey(token),
@@ -232,11 +239,13 @@ export class AuthService {
       'EX',
       PASSWORD_RESET_TTL_SECONDS,
     );
+    const link = this.resetLink(token);
     await this.mailer.send({
       to: email,
       subject: 'Welcome to SchoolOS — set your password',
-      html: inviteEmail(name, this.resetLink(token)),
+      html: inviteEmail(name, link),
     });
+    return link;
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {

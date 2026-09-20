@@ -16,8 +16,10 @@ import { SchoolsService } from './schools.service';
 import {
   ListSchoolsQueryDto,
   PagedSchoolsDto,
+  ResendInviteResponseDto,
   SchoolDetailResponseDto,
   SchoolOnboardingDto,
+  SchoolOnboardingResponseDto,
   SchoolResponseDto,
   UpdateSchoolStatusDto,
 } from './dto/school.dto';
@@ -43,7 +45,9 @@ export class SchoolsController {
   @Post()
   @RequirePermission('platform.schools.manage')
   @SkipAudit()
-  create(@Body() dto: SchoolOnboardingDto): Promise<SchoolResponseDto> {
+  create(
+    @Body() dto: SchoolOnboardingDto,
+  ): Promise<SchoolOnboardingResponseDto> {
     return this.schools.create(dto);
   }
 
@@ -61,7 +65,7 @@ export class SchoolsController {
   @RequirePermission('platform.schools.manage')
   @SkipAudit()
   @HttpCode(HttpStatus.OK)
-  resendInvite(@Param('id') id: string): Promise<void> {
+  resendInvite(@Param('id') id: string): Promise<ResendInviteResponseDto> {
     return this.schools.resendInvite(id);
   }
 }

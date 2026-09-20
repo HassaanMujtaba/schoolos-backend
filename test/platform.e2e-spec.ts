@@ -213,11 +213,16 @@ describe('Platform Console (e2e)', () => {
         branchCount: number;
         userCount: number;
         studentCount: number;
+        inviteLink: string;
       }>(createRes);
       expect(school.status).toBe('active');
       expect(school.monthlyAmount).toBe(15000);
       expect(school.branchCount).toBe(0);
       expect(school.userCount).toBe(1);
+      // The response carries the owner's invite link directly — this project's Render deploy
+      // can't reach any SMTP host, so the platform console surfaces this instead of relying on
+      // mail delivery for testing (MailerService's own doc comment).
+      expect(school.inviteLink).toContain('/reset-password?token=');
       onboardedTenantId = school.id;
 
       // The onboarded owner is INVITED, not ACTIVE — can't log in yet with any password.
@@ -264,6 +269,7 @@ describe('Platform Console (e2e)', () => {
       expect(logged).toBeDefined();
       const token = logged!.match(/token=([^"&\s]+)/)?.[1];
       expect(token).toBeDefined();
+      expect(new URL(school.inviteLink).searchParams.get('token')).toBe(token);
       warnSpy.mockRestore();
 
       const newPassword = 'a brand new owner password 123';
@@ -358,6 +364,14 @@ describe('Platform Console (e2e)', () => {
         .set('Authorization', `Bearer ${adminToken}`);
       expect(resendRes.status).toBe(200);
 
+      // The response carries the link directly (not just the dev-only log) — this project's
+      // Render deploy can't reach any SMTP host, so the platform console surfaces this instead of
+      // relying on mail delivery for testing.
+      const { inviteLink } = body<{ inviteLink: string }>(resendRes);
+      expect(inviteLink).toContain('/reset-password?token=');
+      const tokenFromResponse = new URL(inviteLink).searchParams.get('token');
+      expect(tokenFromResponse).toBeTruthy();
+
       const logged = warnSpy.mock.calls
         .map((call) => String(call[0]))
         .find(
@@ -366,6 +380,7 @@ describe('Platform Console (e2e)', () => {
         );
       expect(logged).toBeDefined();
       const token = logged!.match(/token=([^"&\s]+)/)?.[1];
+      expect(token).toBe(tokenFromResponse);
       warnSpy.mockRestore();
 
       // The re-issued token is a live, independent credential — it activates the account.

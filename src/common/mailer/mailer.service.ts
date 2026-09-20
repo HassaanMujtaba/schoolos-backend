@@ -16,14 +16,17 @@ export interface MailInput {
  * "resolves the same way regardless" posture `AuthService.forgotPassword` already documents for
  * why: a mail failure shouldn't surface as a 500 to whatever request triggered it.
  *
- * Reverted here from Resend's HTTPS API back to raw SMTP, at explicit user request — but pointed
- * at Resend's own SMTP relay (`smtp.resend.com`, not Gmail's). Gmail's SMTP proved unreachable
- * from Render twice, with a live trace both times (`ENETUNREACH` against its IPv6 address, or a
- * bare connection timeout on IPv4; never an auth error, so a network reachability problem, not a
- * credentials one) — a mail-infra provider's own relay doesn't have that problem, so this keeps
- * nodemailer/SMTP as requested while actually working. The `connectionTimeout`/
- * `greetingTimeout`/`socketTimeout` below still keep any future failure bounded and logged
- * instead of hanging the request that triggered it.
+ * Configured against Gmail's SMTP at explicit user request, despite this being a known-broken
+ * path: live-traced three times from this Render deploy (twice against Gmail, once against
+ * Resend's own SMTP relay) and every attempt failed the same way — `ENETUNREACH` against Gmail's
+ * IPv6 address, or a bare connection timeout otherwise, never an auth error. That's Render
+ * blocking outbound SMTP outright, not a Gmail- or credentials-specific problem, so no SMTP host
+ * is expected to work here. Kept as-is anyway per that explicit request — the actual fallback for
+ * "testing shouldn't depend on mail delivery" lives in the callers: `SchoolsService.create`/
+ * `resendInvite` and `AuthService.issueInviteToken` return the invite/reset link directly in the
+ * API response (surfaced in the platform console UI) rather than relying on this method to
+ * deliver it. The `connectionTimeout`/`greetingTimeout`/`socketTimeout` below still keep a future
+ * attempt here bounded and logged instead of hanging the request that triggered it.
  */
 @Injectable()
 export class MailerService {

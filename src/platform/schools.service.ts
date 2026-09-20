@@ -19,8 +19,10 @@ import { PlatformAuditLogService } from './platform-audit-log.service';
 import { addOneMonthPkt, startOfTodayPkt } from '../common/dates/pkt-time';
 import {
   ListSchoolsQueryDto,
+  ResendInviteResponseDto,
   SchoolDetailResponseDto,
   SchoolOnboardingDto,
+  SchoolOnboardingResponseDto,
   SchoolResponseDto,
   UpdateSchoolStatusDto,
 } from './dto/school.dto';
@@ -107,7 +109,7 @@ export class SchoolsService {
     };
   }
 
-  async create(dto: SchoolOnboardingDto): Promise<SchoolResponseDto> {
+  async create(dto: SchoolOnboardingDto): Promise<SchoolOnboardingResponseDto> {
     const slug = await this.uniqueSlug(dto.name);
     const ownerRole = await this.platformPrisma.role.findUniqueOrThrow({
       where: { key: 'school_owner' },
@@ -154,7 +156,7 @@ export class SchoolsService {
 
     // Outside the transaction — Redis + SMTP, not Postgres (same "don't hold a DB transaction open
     // across an unrelated I/O call" reasoning `certificates.service.ts`'s storage upload follows).
-    await this.auth.issueInviteToken(
+    const inviteLink = await this.auth.issueInviteToken(
       tenant.ownerId,
       tenant.ownerEmail,
       tenant.ownerName,
@@ -172,7 +174,7 @@ export class SchoolsService {
       tenantName: dto.name,
     });
 
-    return this.get(tenant.tenantId);
+    return { ...(await this.get(tenant.tenantId)), inviteLink };
   }
 
   /**
@@ -182,7 +184,7 @@ export class SchoolsService {
    * `BadRequestException` once the owner has activated — resending then would just be confusing,
    * not harmful, but it's a sign the caller has the wrong tenant or stale UI state.
    */
-  async resendInvite(tenantId: string): Promise<void> {
+  async resendInvite(tenantId: string): Promise<ResendInviteResponseDto> {
     const tenant = await this.findOrThrow(tenantId);
     const ownerRole = await this.platformPrisma.role.findUniqueOrThrow({
       where: { key: 'school_owner' },
@@ -199,13 +201,18 @@ export class SchoolsService {
         'No pending invite for this school — the owner has already set their password.',
       );
     }
-    await this.auth.issueInviteToken(owner.id, owner.email, owner.name);
+    const inviteLink = await this.auth.issueInviteToken(
+      owner.id,
+      owner.email,
+      owner.name,
+    );
     await this.auditLog.record({
       action: 'school.invite_resent',
       target: tenant.school?.name ?? tenant.name,
       tenantId,
       tenantName: tenant.school?.name ?? tenant.name,
     });
+    return { inviteLink };
   }
 
   async updateStatus(

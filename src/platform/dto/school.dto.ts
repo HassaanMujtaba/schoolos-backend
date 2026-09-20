@@ -62,6 +62,22 @@ export class SchoolResponseDto {
   @ApiProperty() createdAt!: string;
 }
 
+/**
+ * `POST /platform/schools`'s response — `SchoolResponseDto` plus the owner's "set your password"
+ * link. This project's Render deploy currently can't reach any SMTP host (see
+ * `MailerService`'s own doc comment), so the link is returned directly rather than relying
+ * entirely on email delivery; the platform console surfaces it so onboarding can still be tested
+ * end to end. Safe here: this endpoint is already gated on `platform.schools.manage`.
+ */
+export class SchoolOnboardingResponseDto extends SchoolResponseDto {
+  @ApiProperty() inviteLink!: string;
+}
+
+/** `POST /platform/schools/:id/resend-invite`'s response — same reasoning as `SchoolOnboardingResponseDto`. */
+export class ResendInviteResponseDto {
+  @ApiProperty() inviteLink!: string;
+}
+
 class SchoolBranchSummaryDto {
   @ApiProperty() id!: string;
   @ApiProperty() name!: string;
