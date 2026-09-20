@@ -94,19 +94,31 @@ class EnvironmentVariables {
   @IsOptional()
   FRONTEND_BASE_URL = 'http://localhost:5173';
 
-  // Resend (`common/mailer/mailer.service.ts`) — an HTTPS API, not raw SMTP; see
-  // `AppConfigService.resendApiKey`'s doc comment for why. Optional the same way
-  // `STRIPE_SECRET_KEY` was: unset in local/CI, `MailerService` logs a `[dev-only]` line instead
-  // of sending (same discipline as `AuthService.forgotPassword`'s dev-only reset link) rather than
-  // failing boot the way S3_* above does — no route mounts unconditionally that *requires* real
-  // mail delivery to function.
+  // SMTP — `common/mailer/mailer.service.ts`. Optional the same way `STRIPE_SECRET_KEY` was:
+  // unset in local/CI, `MailerService` logs a `[dev-only]` line instead of sending (same
+  // discipline as `AuthService.forgotPassword`'s dev-only reset link) rather than failing boot the
+  // way S3_* above does — no route mounts unconditionally that *requires* real mail delivery to
+  // function.
   @IsString()
   @IsOptional()
-  RESEND_API_KEY?: string;
+  SMTP_HOST?: string;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsOptional()
+  SMTP_PORT = 587;
 
   @IsString()
   @IsOptional()
-  RESEND_FROM = 'SchoolOS <onboarding@resend.dev>';
+  SMTP_USER?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_PASS?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_FROM = 'SchoolOS <no-reply@schoolos.dev>';
 }
 
 export function validateEnv(
