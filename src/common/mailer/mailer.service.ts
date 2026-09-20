@@ -64,6 +64,14 @@ export class MailerService {
         auth: this.config.smtpUser
           ? { user: this.config.smtpUser, pass: this.config.smtpPass }
           : undefined,
+        // Nodemailer's defaults (2min connection, 10min socket) mean a provider that silently
+        // drops outbound SMTP — common for platform-hosted senders reaching Gmail — hangs this
+        // long instead of hitting the catch block below. `send()`'s whole "log loudly and move
+        // on" promise depends on failing fast, and callers like `SchoolsService.create` await
+        // this before responding to their own HTTP request.
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 10_000,
       });
     }
     return this.transporter;
